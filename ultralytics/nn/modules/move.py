@@ -539,7 +539,7 @@ class DualAxisAggAttn(nn.Module):
         self.short_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
 
         self.norm_W = nn.BatchNorm2d(middle_channels)
-        self.qkv_W = Conv(c1=middle_channels, c2=1+(2*middle_channels), k=1, act=True)
+        self.qkv_W = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
 
 
         self.conv_W = nn.Sequential(
@@ -551,7 +551,7 @@ class DualAxisAggAttn(nn.Module):
         )
 
         self.norm_H = nn.BatchNorm2d(middle_channels)
-        self.qkv_H = Conv(c1=middle_channels, c2=1+(2*middle_channels), k=1, act=True)
+        self.qkv_H = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
 
         self.conv_H = nn.Sequential(
             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
@@ -577,11 +577,18 @@ class DualAxisAggAttn(nn.Module):
         x_main = self.main_conv(x) # 
 
         # 横向选择性聚合全局上下文信息
-        qkv_W = self.qkv_W(x_main)
+        qkv_W = self.qkv_W(x_main) # [B, C, H, W] -> [B, 1+2C, H, W]
+        # query: [B, 1, H, W]
+        # key, value: [B, C, H, W]
         query, key, value = torch.split(qkv_W, [1, self.middle_channels, self.middle_channels], dim=1)
+        # 沿着维度W应用softmax
         context_scores = F.softmax(query, dim=-1)
+        # 计算上下文向量
+        # [B, C, H, W] x [B, 1, H, W] -> [B, C, H, W]
         context_vector = key * context_scores
+        # [B, C, H, W] -> [B, C, H, 1]
         context_vector = torch.sum(context_vector, dim=-1, keepdim=True)
+        # [B, C, H, W] x [B, C, H, 1] -> [B, C, H, W]
         x_W = value * context_vector.expand_as(value) #/ math.sqrt(self.middle_channels)
         x_W = self.norm_W(x_W)
         # 信息过滤
@@ -590,8 +597,10 @@ class DualAxisAggAttn(nn.Module):
         # 纵向选择性聚合全局上下文信息
         qkv_H = self.qkv_H(x_W)
         query, key, value = torch.split(qkv_H, [1, self.middle_channels, self.middle_channels], dim=1)
+        # 沿着维度H应用softmax
         context_scores = F.softmax(query, dim=-2)
         context_vector = key * context_scores
+        # [B, C, H, W] -> [B, C, 1, W]
         context_vector = torch.sum(context_vector, dim=-2, keepdim=True)
         x_H = value * context_vector.expand_as(value) #/ math.sqrt(self.middle_channels)
         x_H = self.norm_H(x_H)
