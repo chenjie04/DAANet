@@ -17,6 +17,6 @@ train_results = model.train(
     batch=128,
     imgsz=640,  # training image size
     device=[0, 1],  # device to run on, i.e. device=0 or device=0,1,2,3 or device=cpu
-    project="runs/yolo11_voc_ab",
-    name="113n",
+    project="runs/yolo11_voc_attn_ab",
+    name="113n_experts_16",
 )
