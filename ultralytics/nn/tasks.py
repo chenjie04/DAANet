@@ -64,6 +64,7 @@ from ultralytics.nn.modules import (
     WorldDetect,
     v10Detect,
     TransMoVE,
+    PinwheelAttn,
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1074,11 +1075,19 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = args[0]
             c1 = ch[f]
             args = [*args[1:]]
+        # -----------------------------------------------------------------
+        # 我自己添加的
         elif m is TransMoVE:
             c2 = args[0]
             c1 = ch[f]
             c2 = make_divisible(min(c2, max_channels) * width, 8)
             args = [c1, c2, *args[1:]]
+        elif m is PinwheelAttn:
+            c2 = args[0]
+            c1 = ch[f]
+            c2 = make_divisible(min(c2, max_channels) * width, 8)
+            args = [c1, c2]
+        # -----------------------------------------------------------------
         else:
             c2 = ch[f]
 

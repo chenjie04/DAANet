@@ -533,15 +533,13 @@ class DualAxisAggAttn(nn.Module):
         middle_channels = int(in_channels * 0.5)
         self.middle_channels = middle_channels
 
-        final_conv_in_channels = 4 * middle_channels
+        final_conv_in_channels = 2 * middle_channels
 
         self.main_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
         self.short_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
 
-        self.norm_W = nn.BatchNorm2d(middle_channels)
+
         self.qkv_W = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
-
-
         self.conv_W = nn.Sequential(
             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
             Conv(
@@ -550,9 +548,8 @@ class DualAxisAggAttn(nn.Module):
             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
         )
 
-        self.norm_H = nn.BatchNorm2d(middle_channels)
-        self.qkv_H = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
 
+        self.qkv_H = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
         self.conv_H = nn.Sequential(
             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
             Conv(
@@ -589,10 +586,10 @@ class DualAxisAggAttn(nn.Module):
         # [B, C, H, W] -> [B, C, H, 1]
         context_vector = torch.sum(context_vector, dim=-1, keepdim=True)
         # [B, C, H, W] x [B, C, H, 1] -> [B, C, H, W]
-        x_W = value * context_vector.expand_as(value) #/ math.sqrt(self.middle_channels)
-        x_W = self.norm_W(x_W)
+        x_W = value * context_vector.expand_as(value) / math.sqrt(self.middle_channels) + x_main
+
         # 信息过滤
-        x_W = self.conv_W(x_W)
+        x_W = self.conv_W(x_W) +  x_W
 
         # 纵向选择性聚合全局上下文信息
         qkv_H = self.qkv_H(x_W)
@@ -602,13 +599,13 @@ class DualAxisAggAttn(nn.Module):
         context_vector = key * context_scores
         # [B, C, H, W] -> [B, C, 1, W]
         context_vector = torch.sum(context_vector, dim=-2, keepdim=True)
-        x_H = value * context_vector.expand_as(value) #/ math.sqrt(self.middle_channels)
-        x_H = self.norm_H(x_H)
+        x_H = value * context_vector.expand_as(value) / math.sqrt(self.middle_channels) + x_W
+
         # 信息过滤
-        x_H = self.conv_H(x_H)
+        x_H = self.conv_H(x_H) + x_H
 
         # 多路径信息融合
-        x_final = torch.cat((x_H, x_W, x_main, x_short), dim=1)
+        x_final = torch.cat((x_H, x_short), dim=1)
 
         return self.final_conv(x_final) + residual_final
 

@@ -90,6 +90,7 @@ from .transformer import (
 )
 
 from .move import TransMoVE
+from .pinwheel_attn import PinwheelAttn
 
 __all__ = (
     "Conv",

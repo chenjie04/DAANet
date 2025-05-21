@@ -18,13 +18,14 @@ class PinwheelAttn(nn.Module):
         middle_channels = int(in_channels * 0.5)
         self.middle_channels = middle_channels
 
-        final_conv_in_channels = 3 * middle_channels
+        final_conv_in_channels = 2 * middle_channels
 
         self.main_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
         self.short_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
 
-        self.qkv_W = Conv(c1=middle_channels, c2=1 + middle_channels, k=1, act=True)
-        self.qkv_H = Conv(c1=middle_channels, c2=1 + middle_channels, k=1, act=True)
+        self.qk_W = Conv(c1=middle_channels, c2=1+middle_channels, k=1, act=True)
+        self.qk_H = Conv(c1=middle_channels, c2=1+middle_channels, k=1, act=True)
+        self.v = Conv(c1=middle_channels, c2=middle_channels, k=1, act=True)
 
         self.filter = nn.Sequential(
             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
@@ -50,25 +51,30 @@ class PinwheelAttn(nn.Module):
         x_main = self.main_conv(x) # 
 
         # 横向选择性聚合全局上下文信息
-        qkv_W = self.qkv_W(x_main)
-        query, key = torch.split(qkv_W, [1, self.middle_channels], dim=1)
+        qk_W = self.qk_W(x_main)
+        query, key = torch.split(qk_W, [1, self.middle_channels], dim=1)
         context_scores = F.softmax(query, dim=-1)
         context_vector = key * context_scores
         context_vector_W = torch.sum(context_vector, dim=-1, keepdim=True)
 
         # 纵向选择性聚合全局上下文信息
-        qkv_H = self.qkv_H(x_main)
-        query, key = torch.split(qkv_H, [1, self.middle_channels], dim=1)
+        qk_H = self.qk_H(x_main)
+        query, key = torch.split(qk_H, [1, self.middle_channels], dim=1)
         context_scores = F.softmax(query, dim=-2)
         context_vector = key * context_scores
         context_vector_H = torch.sum(context_vector, dim=-2, keepdim=True)
 
-        # [B, C, H, 1] @ [B, C, 1, W] -> [B, C, H, W]
-        context = torch.matmul(context_vector_W, context_vector_H) / math.sqrt(self.middle_channels)
-        context = self.filter(context)
+        # [B, C, H, 1] x [B, C, 1, W] -> [B, C, H, W]
+        context = context_vector_W * context_vector_H / math.sqrt(self.middle_channels)
+
+        value = self.v(x_main)
+
+        att_out = value * context + x_main
+
+        x_out = self.filter(att_out)
 
         # 多路径信息融合
-        x_final = torch.cat((context, x_main, x_short), dim=1)
+        x_final = torch.cat((x_out, x_short), dim=1)
 
         return self.final_conv(x_final) + residual_final
 
