@@ -540,23 +540,23 @@ class DualAxisAggAttn(nn.Module):
 
 
         self.qkv_W = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
-        self.conv_W = nn.Sequential(
-            Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
-            Conv(
-                c1=middle_channels, c2=middle_channels, k=3, g=middle_channels, act=True
-            ),
-            Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
-        )
+        # self.conv_W = nn.Sequential(
+        #     Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
+        #     Conv(
+        #         c1=middle_channels, c2=middle_channels, k=3, g=middle_channels, act=True
+        #     ),
+        #     Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
+        # )
 
 
         self.qkv_H = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
-        self.conv_H = nn.Sequential(
-            Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
-            Conv(
-                c1=middle_channels, c2=middle_channels, k=3, g=middle_channels, act=True
-            ),
-            Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
-        )
+        # self.conv_H = nn.Sequential(
+        #     Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
+        #     Conv(
+        #         c1=middle_channels, c2=middle_channels, k=3, g=middle_channels, act=True
+        #     ),
+        #     Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
+        # )
 
 
         self.final_conv = Conv(
@@ -589,7 +589,7 @@ class DualAxisAggAttn(nn.Module):
         x_W = value * context_vector.expand_as(value) / math.sqrt(self.middle_channels) + x_main
 
         # 信息过滤
-        x_W = self.conv_W(x_W) +  x_W
+        # x_W = self.conv_W(x_W) +  x_W
 
         # 纵向选择性聚合全局上下文信息
         qkv_H = self.qkv_H(x_W)
@@ -602,7 +602,7 @@ class DualAxisAggAttn(nn.Module):
         x_H = value * context_vector.expand_as(value) / math.sqrt(self.middle_channels) + x_W
 
         # 信息过滤
-        x_H = self.conv_H(x_H) + x_H
+        # x_H = self.conv_H(x_H) + x_H
 
         # 多路径信息融合
         x_final = torch.cat((x_H, x_short), dim=1)
@@ -622,7 +622,7 @@ class FakeDualAxisAggAttn(nn.Module):
 
         middle_channels = int(in_channels * 0.5)
 
-        final_conv_in_channels = 4 * middle_channels
+        final_conv_in_channels = 2 * middle_channels
 
         self.main_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
         self.short_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
@@ -657,12 +657,12 @@ class FakeDualAxisAggAttn(nn.Module):
         x_short = self.short_conv(x)
         x_main = self.main_conv(x)
 
-        x_plus_W = self.conv_W(x_main)
+        x_plus_W = self.conv_W(x_main) +  x_main
 
-        x_plus_WH = self.conv_H(x_plus_W)
+        x_plus_WH = self.conv_H(x_plus_W) + x_plus_W
 
         # 多路径信息融合
-        x_final = torch.cat((x_plus_WH, x_plus_W, x_main, x_short), dim=1)
+        x_final = torch.cat((x_plus_WH, x_short), dim=1)
 
         return self.final_conv(x_final) + residual_final
 

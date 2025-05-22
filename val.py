@@ -6,7 +6,7 @@ print("模型复杂度:")
 model.info(detailed=False)
 
 # wget https://github.com/THU-MIG/yolov10/releases/download/v1.1/yolov10{n/s/m/b/l/x}.pt
-model = YOLO('runs/yolo11_voc_attn_ab/113n_experts_1619/weights/best.pt')
+model = YOLO('runs/yolo11_voc_attn_ab/113n_experts_16_fake_attn/weights/best.pt')
 
 
 
