@@ -4,7 +4,7 @@ from thop import profile
 
 
 model = YOLO("yolo113n.yaml")
-print(model)
+# print(model)
 
 model.info(detailed=False)
 

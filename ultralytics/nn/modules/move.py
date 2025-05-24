@@ -199,6 +199,58 @@ class MoVE(nn.Module):
         return moe_out
 
 
+    
+class MoVE_no_gate(nn.Module):
+    """
+    MoVE: Multi-experts Convolutional Neural Network with Gate mechanism.
+
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_experts: int = 9,
+        kernel_size: int = 3,
+    ):
+        super().__init__()
+
+        self.num_experts = num_experts
+        padding = kernel_size // 2
+
+        # 并行化专家计算
+        self.expert_conv = nn.Conv2d(
+            in_channels,
+            in_channels * num_experts,
+            kernel_size,
+            padding=padding,
+            groups=in_channels,
+            bias=False,
+        )
+        self.expert_norm = nn.InstanceNorm2d(in_channels * num_experts)
+        self.expert_act = nn.SiLU()
+
+
+        self.out_project = Conv(c1=in_channels, c2=out_channels, k=1, act=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        B, C, H, W = x.shape
+        A = self.num_experts
+
+        # 使用分组卷积处理所有通道
+        expert_outputs = self.expert_act(
+            self.expert_norm(self.expert_conv(x))
+        )  # (B, C*A, H, W)
+
+        expert_outputs = expert_outputs.view(B, C, A, H, W)  # (B, C, A, H, W)
+
+        moe_out = expert_outputs.sum(dim=2)
+
+        moe_out = self.out_project(moe_out)
+
+        return moe_out
+
 def channel_shuffle(x, groups):
     """Channel Shuffle operation.
 
@@ -346,7 +398,7 @@ class GhostModule(nn.Module):
         super().__init__()
 
         self.middle_channels = int(in_channels // 2)
-        self.primary_conv = Conv(in_channels, self.middle_channels, k=1, act=True)
+        self.primary_conv = Conv(in_channels, self.middle_channels, k=kernel_size, act=True)
 
         self.cheap_operation = Conv(
             self.middle_channels,
@@ -356,14 +408,14 @@ class GhostModule(nn.Module):
             act=True,
         )  # 3x3深度分离卷积, 即num_experts=1
 
-        # self.out_project = Conv(self.middle_channels * 2, out_channels, k=1, act=True)
+        self.out_project = Conv(self.middle_channels * 2, out_channels, k=1, act=True)
 
     def forward(self, x):
         x1 = self.primary_conv(x)
         x2 = self.cheap_operation(x1)
         out = torch.cat([x1, x2], dim=1)
-        # out = channel_shuffle(out, 2)
-        # out = self.out_project(out)
+        out = channel_shuffle(out, 2)
+        out = self.out_project(out)
         return out
 
 
@@ -399,127 +451,6 @@ class MoVE_GhostModule(nn.Module):
         out = self.out_project(out)
         return out
 
-
-# class DualAxisAggAttn(nn.Module):
-#     """Efficient dual-axis aggregation attention module.DAANet的基本模块
-#         YOLO113n summary: 166 layers, 2,555,428 parameters, 0 gradients, 6.6 GFLOPs
-#                      Class     Images  Instances      Box(P          R      mAP50  mAP50-95): 100%|██████████| 39/39 [00:11<00:00,  3.29it/s]
-#                        all       4952      12032      0.808      0.735      0.816      0.617
-#                  aeroplane        204        285      0.901      0.798      0.891       0.67
-#                    bicycle        239        337      0.885       0.84      0.912      0.704
-#                       bird        282        459      0.797      0.675       0.77      0.543
-#                       boat        172        263      0.749      0.677      0.752      0.495
-#                     bottle        212        469      0.847      0.569      0.706      0.482
-#                        bus        174        213      0.855      0.798      0.873      0.767
-#                        car        721       1201      0.883      0.826      0.914      0.738
-#                        cat        322        358      0.834      0.838       0.88      0.702
-#                      chair        417        756      0.747      0.496      0.638      0.433
-#                        cow        127        244      0.741      0.824      0.848       0.64
-#                diningtable        190        206      0.745      0.728      0.764       0.61
-#                        dog        418        489      0.786      0.753      0.849      0.663
-#                      horse        274        348      0.859      0.874      0.918      0.738
-#                  motorbike        222        325      0.876      0.801      0.899      0.656
-#                     person       2007       4528      0.891      0.764      0.874      0.607
-#                pottedplant        224        480      0.689       0.39       0.52       0.29
-#                      sheep         97        242        0.7       0.76      0.821      0.634
-#                       sofa        223        239      0.635      0.741      0.786      0.653
-#                      train        259        282      0.879      0.852      0.903      0.691
-#                  tvmonitor        229        308      0.871      0.699      0.796      0.615
-#     Speed: 0.1ms preprocess, 1.3ms inference, 0.0ms loss, 0.2ms postprocess per image
-#     Results saved to runs/yolo11_VOC/113n133
-
-#     """
-
-#     def __init__(
-#         self,
-#         in_channels: int,
-#         out_channels: int,
-#     ):
-#         super().__init__()
-
-#         middle_channels = int(in_channels * 0.5)
-
-#         final_conv_in_channels = 4 * middle_channels
-
-#         self.main_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
-#         self.short_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
-
-#         self.attn_W = Conv(c1=middle_channels, c2=1, k=1, act=True)
-#         self.conv_W = nn.Sequential(
-#             Conv(
-#                 c1=middle_channels, c2=middle_channels, k=3, g=middle_channels, act=True
-#             ),
-#             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
-#         )
-#         # self.conv_W = Conv(
-#         #     c1=middle_channels, c2=middle_channels, k=3, g=1, act=True
-#         # )
-
-#         self.attn_H = Conv(c1=middle_channels, c2=1, k=1, act=True)
-#         self.conv_H = nn.Sequential(
-#             Conv(
-#                 c1=middle_channels, c2=middle_channels, k=3, g=middle_channels, act=True
-#             ),
-#             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
-#         )
-#         # self.conv_H = Conv(
-#         #     c1=middle_channels, c2=middle_channels, k=3, g=1, act=True
-#         # )
-
-#         self.final_conv = Conv(
-#             c1=final_conv_in_channels, c2=out_channels, k=1, act=True
-#         )
-
-#     def forward(self, x: torch.Tensor) -> torch.Tensor:
-#         """Forward process
-#         Args:
-#             x (Tensor): The input tensor.
-#         """
-#         residual_final = x
-
-#         x_short = self.short_conv(x)
-#         x_main = self.main_conv(x)
-
-#         # 横向选择性聚合全局上下文信息
-#         logits_W = self.attn_W(x_main)
-#         context_scores_W = F.softmax(logits_W, dim=-1)
-#         x_plus_W = x_main + (x_main * context_scores_W).sum(-1, keepdim=True).expand_as(
-#             x_main
-#         )
-#         # 信息过滤
-#         x_plus_W = self.conv_W(x_plus_W)
-
-#         # 纵向选择性聚合全局左右上下文信息
-#         logits_H = self.attn_H(x_plus_W)
-#         context_scores_H = F.softmax(logits_H, dim=-2)
-#         x_plus_WH = x_plus_W + (x_plus_W * context_scores_H).sum(
-#             -2, keepdim=True
-#         ).expand_as(x_plus_W)
-#         # 信息过滤
-#         x_plus_WH = self.conv_H(x_plus_WH)
-
-#         # 多路径信息融合
-#         x_final = torch.cat((x_plus_WH, x_plus_W, x_main, x_short), dim=1)
-
-#         return self.final_conv(x_final) + residual_final
-
-
-class Bottleneck(nn.Module):
-    """Standard bottleneck."""
-
-    def __init__(self, c1, c2, shortcut=True, g=1, k=(3, 1), e=0.5):
-        """Initializes a standard bottleneck module with optional shortcut connection and configurable parameters."""
-        super().__init__()
-        c_ = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, c_, k[0], 1, g=g)
-        self.cv2 = Conv(c_, c2, k[1], 1, g=1)
-        self.add = shortcut and c1 == c2
-
-    def forward(self, x):
-        """Applies the YOLO FPN to input data."""
-        return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
-
-
 class DualAxisAggAttn(nn.Module):
     """Efficient dual-axis aggregation attention module.DAANet的基本模块"""
 
@@ -540,23 +471,23 @@ class DualAxisAggAttn(nn.Module):
 
 
         self.qkv_W = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
-        # self.conv_W = nn.Sequential(
-        #     Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
-        #     Conv(
-        #         c1=middle_channels, c2=middle_channels, k=3, g=middle_channels, act=True
-        #     ),
-        #     Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
-        # )
+        self.conv_W = nn.Sequential(
+            Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
+            Conv(
+                c1=middle_channels, c2=middle_channels, k=3, g=middle_channels, act=True
+            ),
+            Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
+        )
 
 
         self.qkv_H = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
-        # self.conv_H = nn.Sequential(
-        #     Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
-        #     Conv(
-        #         c1=middle_channels, c2=middle_channels, k=3, g=middle_channels, act=True
-        #     ),
-        #     Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
-        # )
+        self.conv_H = nn.Sequential(
+            Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
+            Conv(
+                c1=middle_channels, c2=middle_channels, k=3, g=middle_channels, act=True
+            ),
+            Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
+        )
 
 
         self.final_conv = Conv(
@@ -589,7 +520,7 @@ class DualAxisAggAttn(nn.Module):
         x_W = value * context_vector.expand_as(value) / math.sqrt(self.middle_channels) + x_main
 
         # 信息过滤
-        # x_W = self.conv_W(x_W) +  x_W
+        x_W = self.conv_W(x_W) +  x_W
 
         # 纵向选择性聚合全局上下文信息
         qkv_H = self.qkv_H(x_W)
@@ -602,7 +533,7 @@ class DualAxisAggAttn(nn.Module):
         x_H = value * context_vector.expand_as(value) / math.sqrt(self.middle_channels) + x_W
 
         # 信息过滤
-        # x_H = self.conv_H(x_H) + x_H
+        x_H = self.conv_H(x_H) + x_H
 
         # 多路径信息融合
         x_final = torch.cat((x_H, x_short), dim=1)
@@ -743,18 +674,18 @@ class TransMoVE(nn.Module):
         self.blocks = nn.ModuleList()
         for _ in range(num_blocks):
             if num_in_block == 1:
-                internal_block = MoVE_GhostModule(
-                    in_channels=middle_channels,
-                    out_channels=block_channels,
-                    num_experts=num_experts,
-                    kernel_size=kernel_size,
-                )
-                # internal_block = GhostModule(
+                # internal_block = MoVE_GhostModule(
                 #     in_channels=middle_channels,
                 #     out_channels=block_channels,
                 #     num_experts=num_experts,
                 #     kernel_size=kernel_size,
                 # )
+                internal_block = GhostModule(
+                    in_channels=middle_channels,
+                    out_channels=block_channels,
+                    num_experts=num_experts,
+                    kernel_size=kernel_size,
+                )
             else:
                 internal_block = []
                 for _ in range(num_in_block):
