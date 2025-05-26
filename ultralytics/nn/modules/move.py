@@ -250,6 +250,59 @@ class MoVE_no_gate(nn.Module):
         moe_out = self.out_project(moe_out)
 
         return moe_out
+    
+class MoVE_scale(nn.Module):
+    """
+    MoVE: Multi-experts Convolutional Neural Network with Gate mechanism.
+
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_experts: int = 9,
+        kernel_size: int = 3,
+    ):
+        super().__init__()
+
+        self.num_experts = num_experts
+        padding = kernel_size // 2
+
+        # 并行化专家计算
+        self.expert_conv = nn.Conv2d(
+            in_channels,
+            in_channels * num_experts,
+            kernel_size,
+            padding=padding,
+            groups=in_channels,
+            bias=False,
+        )
+        self.expert_norm = nn.InstanceNorm2d(in_channels * num_experts)
+        self.expert_act = nn.SiLU()
+
+        self.scales = nn.Parameter(torch.ones(in_channels * num_experts), requires_grad=True)
+
+
+        self.out_project = Conv(c1=in_channels, c2=out_channels, k=1, act=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        B, C, H, W = x.shape
+        A = self.num_experts
+
+        # 使用分组卷积处理所有通道
+        expert_outputs = self.expert_act(
+            self.expert_norm(self.expert_conv(x))
+        )  # (B, C*A, H, W)
+        expert_outputs = expert_outputs * self.scales.view(1, -1, 1, 1)
+        expert_outputs = expert_outputs.view(B, C, A, H, W)  # (B, C, A, H, W)
+
+        moe_out = expert_outputs.sum(dim=2)
+
+        moe_out = self.out_project(moe_out)
+
+        return moe_out
 
 def channel_shuffle(x, groups):
     """Channel Shuffle operation.
@@ -434,7 +487,7 @@ class MoVE_GhostModule(nn.Module):
             in_channels, self.middle_channels, k=kernel_size, act=True
         )
 
-        self.cheap_operation = MoVE(
+        self.cheap_operation = MoVE_scale(
             self.middle_channels,
             self.middle_channels,
             num_experts,
@@ -674,18 +727,18 @@ class TransMoVE(nn.Module):
         self.blocks = nn.ModuleList()
         for _ in range(num_blocks):
             if num_in_block == 1:
-                # internal_block = MoVE_GhostModule(
-                #     in_channels=middle_channels,
-                #     out_channels=block_channels,
-                #     num_experts=num_experts,
-                #     kernel_size=kernel_size,
-                # )
-                internal_block = GhostModule(
+                internal_block = MoVE_GhostModule(
                     in_channels=middle_channels,
                     out_channels=block_channels,
                     num_experts=num_experts,
                     kernel_size=kernel_size,
                 )
+                # internal_block = GhostModule(
+                #     in_channels=middle_channels,
+                #     out_channels=block_channels,
+                #     num_experts=num_experts,
+                #     kernel_size=kernel_size,
+                # )
             else:
                 internal_block = []
                 for _ in range(num_in_block):

@@ -4,6 +4,7 @@ from ultralytics.nn.modules.conv import Conv
 
 from typing import Tuple
 
+# 效果极差
 
 class Rep_MoVE(nn.Module):
     """
@@ -36,61 +37,63 @@ class Rep_MoVE(nn.Module):
                     groups=in_channels,
                     bias=False,
                 ),
-                nn.BatchNorm2d(in_channels),
+                nn.InstanceNorm2d(in_channels),
                 nn.SiLU(),
             )
         else:
             experts = list()
             for i in range(num_experts):
-                experts.append(
-                    self._conv_bn(
-                        in_channels=in_channels,
-                        out_channels=in_channels,
-                        kernel_size=kernel_size,
+                expert = self._conv_in(
+                        in_channels,
+                        in_channels,
+                        kernel_size,
                         stride=1,
                         padding=kernel_size // 2,
                         groups=in_channels,
                         bias=False,
                     )
+                # 在这里添加激活之后，就无法保证重参数化等价,但是这里进行非线性激活对增强模型能力很重要
+                expert.add_module("act", nn.SiLU()) 
+                experts.append(
+                    expert
                 )
             self.experts = nn.ModuleList(experts)
-            self.act = nn.SiLU()
 
             # 初始化缩放因子为1.0（保持初始输出不变）
             self.scales = nn.ParameterList(
-                [nn.Parameter(torch.ones(in_channels) * 0.1) for _ in range(num_experts)]
+                [
+                    nn.Parameter(torch.ones(in_channels))
+                    for _ in range(num_experts)
+                ]
             )
 
-        self.out_prj = self._conv_bn(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=1,
-            stride=1,
-            padding=0,
-            groups=1,
-            bias=False,
+            self.act = nn.SiLU() # 用于重参数化之后的激活
+
+        self.out_prj = Conv(
+            c1=in_channels,
+            c2=out_channels,
+            k=1,
+            act=True,
         )
-        self.out_prj.add_module("silu", nn.SiLU())
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         if self.infer_mode:
-            print("Infer mode")
+            # print("Infer mode")
             x = self.reparam_expert(x)
             x = self.out_prj(x)
             return x
         else:
-            print("Train mode")
+            # print("Train mode")
             moe_out = 0
             for i in range(self.num_experts):
                 moe_out += self.experts[i](x) * self.scales[i].view(1, -1, 1, 1)
-            moe_out = self.act(moe_out)
 
             moe_out = self.out_prj(moe_out)
 
             return moe_out
 
-    def _conv_bn(
+    def _conv_in(
         self,
         in_channels,
         out_channels,
@@ -100,11 +103,11 @@ class Rep_MoVE(nn.Module):
         groups=1,
         bias=False,
     ):
-        """Helper method to construct conv-batchnorm layers.
+        """Helper method to construct conv-instancenorm layers.
 
         :param kernel_size: Size of the convolution kernel.
         :param padding: Zero-padding size.
-        :return: Conv-BN module.
+        :return: Conv-IN module.
         """
         mod_list = nn.Sequential()
         mod_list.add_module(
@@ -119,7 +122,10 @@ class Rep_MoVE(nn.Module):
                 bias=bias,
             ),
         )
-        mod_list.add_module("bn", nn.BatchNorm2d(out_channels))
+        mod_list.add_module(
+            "norm",
+            nn.InstanceNorm2d(out_channels, affine=True, track_running_stats=True),
+        )
         return mod_list
 
     def reparameterize(self):
@@ -133,18 +139,27 @@ class Rep_MoVE(nn.Module):
             stride=self.experts[0].conv.stride,
             padding=self.experts[0].conv.padding,
             groups=self.experts[0].conv.groups,
-            bias=True,
+            bias=False,
         )
+        self.expert_norm = nn.InstanceNorm2d(self.experts[0].conv.out_channels)
 
         kernel_conv = 0
         bias_conv = 0
         for i in range(self.num_experts):
-            _kernel, _bias = self._fuse_bn_tensor(self.experts[i])
+            _kernel = self.experts[i].conv.weight
+            running_mean = self.experts[i].norm.running_mean
+            running_var = self.experts[i].norm.running_var
+            gamma = self.experts[i].norm.weight
+            beta = self.experts[i].norm.bias
+            eps = self.experts[i].norm.eps
+            std = (running_var + eps).sqrt()
+            t = (gamma / std).reshape(-1, 1, 1, 1)
+            _kernel = _kernel * t
+            _beta = beta - running_mean * gamma / std
             kernel_conv += _kernel * self.scales[i]
-            bias_conv += _bias
+            bias_conv += _beta * self.scales[i]
 
         self.reparam_expert.weight.data = kernel_conv
-        self.reparam_expert.bias.data = bias_conv
 
         self.reparam_expert = nn.Sequential(
             self.reparam_expert,
@@ -155,44 +170,6 @@ class Rep_MoVE(nn.Module):
         delattr(self, "scales")
 
         self.infer_mode = True
-
-    def _fuse_bn_tensor(self, branch) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Method to fuse batchnorm layer with preceeding conv layer.
-        Reference: https://github.com/DingXiaoH/RepVGG/blob/main/repvgg.py#L95
-
-        :param branch:
-        :return: Tuple of (kernel, bias) after fusing batchnorm.
-        """
-        if isinstance(branch, nn.Sequential):
-            kernel = branch.conv.weight
-            running_mean = branch.bn.running_mean
-            running_var = branch.bn.running_var
-            gamma = branch.bn.weight
-            beta = branch.bn.bias
-            eps = branch.bn.eps
-        else:
-            assert isinstance(branch, nn.BatchNorm2d)
-            if not hasattr(self, "id_tensor"):
-                input_dim = self.in_channels // self.groups
-                kernel_value = torch.zeros(
-                    (self.in_channels, input_dim, self.kernel_size, self.kernel_size),
-                    dtype=branch.weight.dtype,
-                    device=branch.weight.device,
-                )
-                for i in range(self.in_channels):
-                    kernel_value[
-                        i, i % input_dim, self.kernel_size // 2, self.kernel_size // 2
-                    ] = 1
-                self.id_tensor = kernel_value
-            kernel = self.id_tensor
-            running_mean = branch.running_mean
-            running_var = branch.running_var
-            gamma = branch.weight
-            beta = branch.bias
-            eps = branch.eps
-        std = (running_var + eps).sqrt()
-        t = (gamma / std).reshape(-1, 1, 1, 1)
-        return kernel * t, beta - running_mean * gamma / std
 
 
 if __name__ == "__main__":

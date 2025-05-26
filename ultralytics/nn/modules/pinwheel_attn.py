@@ -11,9 +11,8 @@ class PinwheelAttnBlock(nn.Module):
 
         self.channels = channels
 
-        self.qk_W = Conv(c1=channels, c2=1+channels, k=1, act=True)
-        self.qk_H = Conv(c1=channels, c2=1+channels, k=1, act=True)
-        self.v = Conv(c1=channels, c2=channels, k=1, act=True)
+        self.qkv_W = Conv(c1=channels, c2=1+(2*channels), k=1, act=True)
+        self.qkv_H = Conv(c1=channels, c2=1+(2*channels), k=1, act=True)
 
         self.filter = nn.Sequential(
             Conv(c1=channels, c2=channels, k=1, act=True),
@@ -25,25 +24,22 @@ class PinwheelAttnBlock(nn.Module):
 
     def forward(self, x):
         # 横向选择性聚合全局上下文信息
-        qk_W = self.qk_W(x)
-        query, key = torch.split(qk_W, [1, self.channels], dim=1)
+        qkv_W = self.qkv_W(x)
+        query, key, value = torch.split(qkv_W, [1, self.channels, self.channels], dim=1)
         context_scores = F.softmax(query, dim=-1)
         context_vector = key * context_scores
-        context_vector_W = torch.sum(context_vector, dim=-1, keepdim=True)
+        context_vector = torch.sum(context_vector, dim=-1, keepdim=True)
+        x_W = x + value * context_vector.expand_as(x) / math.sqrt(self.channels)
 
         # 纵向选择性聚合全局上下文信息
-        qk_H = self.qk_H(x)
-        query, key = torch.split(qk_H, [1, self.channels], dim=1)
+        qkv_H = self.qkv_H(x)
+        query, key, value = torch.split(qkv_H, [1, self.channels, self.channels], dim=1)
         context_scores = F.softmax(query, dim=-2)
         context_vector = key * context_scores
-        context_vector_H = torch.sum(context_vector, dim=-2, keepdim=True)
+        context_vector = torch.sum(context_vector, dim=-2, keepdim=True)
+        x_H = x + value * context_vector.expand_as(x) / math.sqrt(self.channels)
 
-        # [B, C, H, 1] x [B, C, 1, W] -> [B, C, H, W]
-        context = context_vector_W * context_vector_H / math.sqrt(self.channels)
-
-        value = self.v(x)
-
-        att_out = value * context + x
+        att_out = x_W + x_H
 
         x_out = self.filter(att_out)
 
