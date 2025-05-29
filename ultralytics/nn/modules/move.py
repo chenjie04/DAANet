@@ -487,7 +487,7 @@ class MoVE_GhostModule(nn.Module):
             in_channels, self.middle_channels, k=kernel_size, act=True
         )
 
-        self.cheap_operation = MoVE_scale(
+        self.cheap_operation = MoVE(
             self.middle_channels,
             self.middle_channels,
             num_experts,
