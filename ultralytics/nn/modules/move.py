@@ -114,7 +114,25 @@ class SelfAttn(nn.Module):
         return self.proj(x)
 
 
-class Gate(nn.Module):
+class SwiGLU(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim * 2)
+        self.fc2 = nn.Linear(hidden_dim, input_dim)
+
+    def forward(self, x):
+        # 将输入经过两个线性变换，分别得到门控和激活部分
+        x, activation = self.fc1(x).chunk(2, dim=-1)
+        # 应用Swish激活函数到门控和激活部分, 做双向奔赴的门控
+        # gate = F.silu(gate)
+        activation = F.silu(activation)
+        # 将门控和激活部分逐元素相乘
+        output = x * activation
+        # 经过第二个线性变换得到最终输出
+        return self.fc2(output)
+
+
+class Gate_v2(nn.Module):
     def __init__(
         self,
         num_experts: int = 8,
@@ -127,18 +145,14 @@ class Gate(nn.Module):
 
         # 使用更大的隐藏层增强表达能力
         hidden_dim = int(num_experts * 2.0)
-        self.spatial_mixer = nn.Sequential(
-            nn.Linear(num_experts, hidden_dim, bias=False),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, num_experts, bias=True),
-            nn.Sigmoid(),  # 绝对不能用 nn.Softmax(dim=-1), 否则性能严重下降
-        )
+        self.spatial_mixer = SwiGLU(input_dim=num_experts, hidden_dim=hidden_dim)
+        self.act = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, _, _ = x.shape
         pooled = self.avg_pool(x)  # (B, C, root, root)
-        # print(pooled.shape)
         weights = self.spatial_mixer(pooled.view(B, C, -1))  # (B, C, num_experts)
+        weights = self.act(weights)
         return weights
 
 
@@ -172,7 +186,7 @@ class MoVE(nn.Module):
         self.expert_norm = nn.InstanceNorm2d(in_channels * num_experts)
         self.expert_act = nn.SiLU()
 
-        self.gate = Gate(num_experts=num_experts, channels=in_channels)
+        self.gate = Gate_v2(num_experts=num_experts, channels=in_channels)
 
         self.out_project = Conv(c1=in_channels, c2=out_channels, k=1, act=True)
 
@@ -199,7 +213,6 @@ class MoVE(nn.Module):
         return moe_out
 
 
-    
 class MoVE_no_gate(nn.Module):
     """
     MoVE: Multi-experts Convolutional Neural Network with Gate mechanism.
@@ -230,7 +243,6 @@ class MoVE_no_gate(nn.Module):
         self.expert_norm = nn.InstanceNorm2d(in_channels * num_experts)
         self.expert_act = nn.SiLU()
 
-
         self.out_project = Conv(c1=in_channels, c2=out_channels, k=1, act=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -250,7 +262,8 @@ class MoVE_no_gate(nn.Module):
         moe_out = self.out_project(moe_out)
 
         return moe_out
-    
+
+
 class MoVE_scale(nn.Module):
     """
     MoVE: Multi-experts Convolutional Neural Network with Gate mechanism.
@@ -281,8 +294,9 @@ class MoVE_scale(nn.Module):
         self.expert_norm = nn.InstanceNorm2d(in_channels * num_experts)
         self.expert_act = nn.SiLU()
 
-        self.scales = nn.Parameter(torch.ones(in_channels * num_experts), requires_grad=True)
-
+        self.scales = nn.Parameter(
+            torch.ones(in_channels * num_experts), requires_grad=True
+        )
 
         self.out_project = Conv(c1=in_channels, c2=out_channels, k=1, act=True)
 
@@ -303,6 +317,7 @@ class MoVE_scale(nn.Module):
         moe_out = self.out_project(moe_out)
 
         return moe_out
+
 
 def channel_shuffle(x, groups):
     """Channel Shuffle operation.
@@ -451,7 +466,9 @@ class GhostModule(nn.Module):
         super().__init__()
 
         self.middle_channels = int(in_channels // 2)
-        self.primary_conv = Conv(in_channels, self.middle_channels, k=kernel_size, act=True)
+        self.primary_conv = Conv(
+            in_channels, self.middle_channels, k=kernel_size, act=True
+        )
 
         self.cheap_operation = Conv(
             self.middle_channels,
@@ -487,7 +504,7 @@ class MoVE_GhostModule(nn.Module):
             in_channels, self.middle_channels, k=kernel_size, act=True
         )
 
-        self.cheap_operation = MoVE(
+        self.cheap_operation = MoVE_scale(
             self.middle_channels,
             self.middle_channels,
             num_experts,
@@ -503,6 +520,7 @@ class MoVE_GhostModule(nn.Module):
         out = channel_shuffle(out, 2)
         out = self.out_project(out)
         return out
+
 
 class DualAxisAggAttn(nn.Module):
     """Efficient dual-axis aggregation attention module.DAANet的基本模块"""
@@ -522,8 +540,9 @@ class DualAxisAggAttn(nn.Module):
         self.main_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
         self.short_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
 
-
-        self.qkv_W = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
+        self.qkv_W = Conv(
+            c1=middle_channels, c2=1 + (2 * middle_channels), k=1, act=True
+        )
         self.conv_W = nn.Sequential(
             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
             Conv(
@@ -532,8 +551,9 @@ class DualAxisAggAttn(nn.Module):
             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
         )
 
-
-        self.qkv_H = Conv(c1=middle_channels, c2=1+(2 * middle_channels), k=1, act=True)
+        self.qkv_H = Conv(
+            c1=middle_channels, c2=1 + (2 * middle_channels), k=1, act=True
+        )
         self.conv_H = nn.Sequential(
             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
             Conv(
@@ -541,7 +561,6 @@ class DualAxisAggAttn(nn.Module):
             ),
             Conv(c1=middle_channels, c2=middle_channels, k=1, act=True),
         )
-
 
         self.final_conv = Conv(
             c1=final_conv_in_channels, c2=out_channels, k=1, act=True
@@ -555,13 +574,15 @@ class DualAxisAggAttn(nn.Module):
         residual_final = x
 
         x_short = self.short_conv(x)
-        x_main = self.main_conv(x) # 
+        x_main = self.main_conv(x)  #
 
         # 横向选择性聚合全局上下文信息
-        qkv_W = self.qkv_W(x_main) # [B, C, H, W] -> [B, 1+2C, H, W]
+        qkv_W = self.qkv_W(x_main)  # [B, C, H, W] -> [B, 1+2C, H, W]
         # query: [B, 1, H, W]
         # key, value: [B, C, H, W]
-        query, key, value = torch.split(qkv_W, [1, self.middle_channels, self.middle_channels], dim=1)
+        query, key, value = torch.split(
+            qkv_W, [1, self.middle_channels, self.middle_channels], dim=1
+        )
         # 沿着维度W应用softmax
         context_scores = F.softmax(query, dim=-1)
         # 计算上下文向量
@@ -570,20 +591,28 @@ class DualAxisAggAttn(nn.Module):
         # [B, C, H, W] -> [B, C, H, 1]
         context_vector = torch.sum(context_vector, dim=-1, keepdim=True)
         # [B, C, H, W] x [B, C, H, 1] -> [B, C, H, W]
-        x_W = value * context_vector.expand_as(value) / math.sqrt(self.middle_channels) + x_main
+        x_W = (
+            value * context_vector.expand_as(value) / math.sqrt(self.middle_channels)
+            + x_main
+        )
 
         # 信息过滤
-        x_W = self.conv_W(x_W) +  x_W
+        x_W = self.conv_W(x_W) + x_W
 
         # 纵向选择性聚合全局上下文信息
         qkv_H = self.qkv_H(x_W)
-        query, key, value = torch.split(qkv_H, [1, self.middle_channels, self.middle_channels], dim=1)
+        query, key, value = torch.split(
+            qkv_H, [1, self.middle_channels, self.middle_channels], dim=1
+        )
         # 沿着维度H应用softmax
         context_scores = F.softmax(query, dim=-2)
         context_vector = key * context_scores
         # [B, C, H, W] -> [B, C, 1, W]
         context_vector = torch.sum(context_vector, dim=-2, keepdim=True)
-        x_H = value * context_vector.expand_as(value) / math.sqrt(self.middle_channels) + x_W
+        x_H = (
+            value * context_vector.expand_as(value) / math.sqrt(self.middle_channels)
+            + x_W
+        )
 
         # 信息过滤
         x_H = self.conv_H(x_H) + x_H
@@ -641,7 +670,7 @@ class FakeDualAxisAggAttn(nn.Module):
         x_short = self.short_conv(x)
         x_main = self.main_conv(x)
 
-        x_plus_W = self.conv_W(x_main) +  x_main
+        x_plus_W = self.conv_W(x_main) + x_main
 
         x_plus_WH = self.conv_H(x_plus_W) + x_plus_W
 

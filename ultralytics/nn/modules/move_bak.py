@@ -2203,3 +2203,56 @@ class TransMoVE(nn.Module):
             block_outs.append(x_block)
         x_final = torch.cat((*block_outs[::-1], x_main, x_short), dim=1)
         return self.final_conv(x_final) + residual
+
+
+class SwiGLUFFN(nn.Module):
+    def __init__(
+        self,
+        dim,
+        hidden_dim,
+        multiple_of,
+        ffn_dim_multiplier=None,
+        device=None,
+        dtype=None,
+    ):
+        factory_kwargs = {"device": device, "dtype": dtype}
+        super().__init__()
+        hidden_dim = int(2 * hidden_dim / 3)
+        # custom dim factor multiplier
+        if ffn_dim_multiplier is not None:
+            hidden_dim = int(ffn_dim_multiplier * hidden_dim)
+        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False, **factory_kwargs)
+        self.w2 = nn.Linear(hidden_dim, dim, bias=False, **factory_kwargs)
+        self.w3 = nn.Linear(dim, hidden_dim, bias=False, **factory_kwargs)
+
+    def forward(self, x):
+        return self.w2(F.silu(self.w1(x)) * self.w3(x))
+
+class Gate(nn.Module):
+    def __init__(
+        self,
+        num_experts: int = 8,
+        channels: int = 512,
+    ):
+        super().__init__()
+
+        self.root = int(math.isqrt(num_experts))
+        self.avg_pool = nn.AdaptiveAvgPool2d((self.root, self.root))
+
+        # 使用更大的隐藏层增强表达能力
+        hidden_dim = int(num_experts * 2.0)
+        self.spatial_mixer = nn.Sequential(
+            nn.Linear(num_experts, hidden_dim, bias=False),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, num_experts, bias=True),
+            nn.Sigmoid(),  # 绝对不能用 nn.Softmax(dim=-1), 否则性能严重下降
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, _, _ = x.shape
+        pooled = self.avg_pool(x)  # (B, C, root, root)
+        # print(pooled.shape)
+        weights = self.spatial_mixer(pooled.view(B, C, -1))  # (B, C, num_experts)
+        return weights
