@@ -2230,7 +2230,24 @@ class SwiGLUFFN(nn.Module):
     def forward(self, x):
         return self.w2(F.silu(self.w1(x)) * self.w3(x))
 
-class Gate(nn.Module):
+class SwiGLU(nn.Module):
+    def __init__(self, input_dim, hidden_dim):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim * 2)
+        self.fc2 = nn.Linear(hidden_dim, input_dim)
+
+    def forward(self, x):
+        # 将输入经过两个线性变换，分别得到门控和激活部分
+        x, activation = self.fc1(x).chunk(2, dim=-1)
+        # 应用Swish激活函数到激活部分
+        activation = F.silu(activation)
+        # 将门控和激活部分逐元素相乘
+        output = x * activation
+        # 经过第二个线性变换得到最终输出
+        return self.fc2(output)
+
+
+class Gate_v2(nn.Module):
     def __init__(
         self,
         num_experts: int = 8,
@@ -2243,16 +2260,12 @@ class Gate(nn.Module):
 
         # 使用更大的隐藏层增强表达能力
         hidden_dim = int(num_experts * 2.0)
-        self.spatial_mixer = nn.Sequential(
-            nn.Linear(num_experts, hidden_dim, bias=False),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, num_experts, bias=True),
-            nn.Sigmoid(),  # 绝对不能用 nn.Softmax(dim=-1), 否则性能严重下降
-        )
+        self.spatial_mixer = SwiGLU(input_dim=num_experts, hidden_dim=hidden_dim)
+        self.act = nn.Sigmoid()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, C, _, _ = x.shape
         pooled = self.avg_pool(x)  # (B, C, root, root)
-        # print(pooled.shape)
         weights = self.spatial_mixer(pooled.view(B, C, -1))  # (B, C, num_experts)
+        weights = self.act(weights)
         return weights
