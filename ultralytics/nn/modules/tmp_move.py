@@ -251,6 +251,7 @@ class DualAxisAggAttn(nn.Module):
         self.channels = channels
         middle_channels = int(channels * middle_ratio)
         self.middle_channels = middle_channels
+        self.inv_sqrt_mid = 1 / math.sqrt(channels)
 
         self.main_conv = Conv(c1=channels, c2=middle_channels, k=1, act=True)
         self.short_conv = Conv(c1=channels, c2=middle_channels, k=1, act=True)
@@ -276,13 +277,81 @@ class DualAxisAggAttn(nn.Module):
         # 明确指定softmax维度
         dim = -1 if axis == 'W' else -2
         context_scores = F.softmax(query, dim=dim)
-        context_vector = (key * context_scores).sum(dim=dim, keepdim=True) 
-        # gate = F.tanh(self.alpha[axis] * value) # 效果不及sigmoid
-        # gate = F.silu(value) # 效果最差
+        context_vector = (F.silu(key) * context_scores).sum(dim=dim, keepdim=True)
         gate = F.sigmoid(value)
-         # 将全局上下文向量乘以权重，并广播注入到特征图中
-        out = x + gate * context_vector.expand_as(value) 
+        out = x + gate * context_vector.expand_as(value) # 将全局上下文向量乘以权重，并广播注入到特征图中
         return out
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): 输入张量，形状为 [B, C, H, W]
+        
+        Returns:
+            torch.Tensor: 输出张量，形状为 [B, C, H, W]
+        """
+        x_short = self.short_conv(x)
+        x_main = self.main_conv(x)
+        # 宽轴注意力
+        x_W = self._apply_axis_attention(x_main, 'W') 
+        x_W_fused = self.conv_fusion['W'](x_W) + x_W
+        # 高轴注意力
+        x_H = self._apply_axis_attention(x_W_fused, 'H') 
+        x_H_fused = self.conv_fusion['H'](x_H) +  x_H
+
+        x_out = torch.cat([x_H_fused, x_short], dim=1)
+
+        x_out = self.out_project(x_out)
+
+        return x_out
+
+# class DualAxisAggAttn(nn.Module):
+#     def __init__(
+#         self,
+#         channels: int,
+#         middle_ratio: float = 0.5,
+#         alpha_init_value: float = 0.5,
+#     ):
+#         super().__init__()
+#         self.channels = channels
+#         middle_channels = int(channels * middle_ratio)
+#         self.middle_channels = middle_channels
+#         self.inv_sqrt_mid = 1 / math.sqrt(channels)
+
+#         self.main_conv = Conv(c1=channels, c2=middle_channels, k=1, act=True)
+#         self.short_conv = Conv(c1=channels, c2=middle_channels, k=1, act=True)
+
+#         self.qkv = nn.ModuleDict({
+#             'W': nn.Conv2d(in_channels=middle_channels, out_channels=1 + 2 * middle_channels, kernel_size=1, bias=True),
+#             'H': nn.Conv2d(in_channels=middle_channels, out_channels=1 + 2 * middle_channels, kernel_size=1, bias=True)
+#         })
+
+#         self.alpha = nn.ParameterDict({
+#             'W': nn.Parameter(torch.ones(1) * alpha_init_value),
+#             'H': nn.Parameter(torch.ones(1) * alpha_init_value)
+#         })
+
+#         self.conv_fusion = nn.ModuleDict({
+#             'W': light_ConvBlock(in_channels=middle_channels, out_channels=middle_channels),
+#             'H': light_ConvBlock(in_channels=middle_channels, out_channels=middle_channels)
+#         })
+
+#         final_channels = int(2 * middle_channels)
+#         self.out_project = Conv(c1=final_channels, c2=channels, k=1, act=True)
+
+#     def _apply_axis_attention(self, x, axis):
+#         """通用轴注意力计算"""
+#         qkv = self.qkv[axis](x)
+#         query, key, value = torch.split(qkv, [1, self.middle_channels, self.middle_channels], dim=1)
+        
+#         # 明确指定softmax维度
+#         dim = -1 if axis == 'W' else -2
+#         context_scores = F.softmax(query, dim=dim)
+#         context_vector = (F.silu(key) * context_scores).sum(dim=dim, keepdim=True)
+#         # 将全局上下文向量乘以权重，并广播注入到特征图中
+#         gate = F.tanh(self.alpha[axis] * value) # 使用tanh函数的原因是因为这里是逐元素激活，保留元素的负值可以保留模型的表达能力
+#         out = x + gate * context_vector.expand_as(value) 
+#         return out
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

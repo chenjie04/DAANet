@@ -176,6 +176,7 @@ calibration_*.npy
 
 datasets/
 runs/
+runs_v0.1/
 tmp/
 wandb/
 实验记录.py

@@ -12,11 +12,12 @@ model = YOLO("yolo113n.yaml")
 train_results = model.train(
     # resume=True,
     data="VOC.yaml",  # path to dataset YAML
+    # data="DUO.yaml",
     # data="coco.yaml",
     epochs=500,  # number of training epochs
-    batch=128,
+    batch=64,
     imgsz=640,  # training image size
     device=[0, 1],  # device to run on, i.e. device=0 or device=0,1,2,3 or device=cpu
-    project="runs/yolo11_voc_attn_ab",
-    name="113n_MoVE_GLU",
+    project="runs/yolo113_VOC_ab",
+    name="n_experts_9",
 )
