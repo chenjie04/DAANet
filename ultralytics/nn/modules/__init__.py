@@ -90,7 +90,7 @@ from .transformer import (
 )
 
 from .move import TransMoVE
-from .pinwheel_attn import PinwheelAttn
+from .pinwheel_attn import PinwheelAttnLayer
 
 __all__ = (
     "Conv",
@@ -166,4 +166,5 @@ __all__ = (
     "Index",
     "A2C2f",
     "TransMoVE",
+    "PinwheelAttnLayer",
 )

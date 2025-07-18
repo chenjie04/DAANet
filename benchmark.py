@@ -1,7 +1,7 @@
 from ultralytics.utils.benchmarks import benchmark
 
 # Benchmark
-benchmark(model="runs/yolo113_DUO_v2/n2/weights/best.pt", data="DUO.yaml", imgsz=640, half=False, device="0")
+benchmark(model="runs/yolo113_VOC_ab/n_experts_16_learnable_weights_62.76/weights/best.pt", data="VOC.yaml", imgsz=640, half=False, device="0")
 
 """
 Benchmark on GPU

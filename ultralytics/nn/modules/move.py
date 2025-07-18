@@ -1,16 +1,126 @@
 
-import math
-import re
-from typing import final
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from ultralytics.utils.torch_utils import model_info
+from ultralytics.nn.modules.criss_cross_attn import CrissCrossAttention
+
+import logging
+
+logger = logging.getLogger(__name__)
+
+USE_FLASH_ATTN = False
+try:
+    import torch
+
+    if (
+        torch.cuda.is_available() and torch.cuda.get_device_capability()[0] >= 8
+    ):  # Ampere or newer
+        from flash_attn.flash_attn_interface import flash_attn_func
+
+        USE_FLASH_ATTN = True
+    else:
+        from torch.nn.functional import scaled_dot_product_attention as sdpa
+
+        logger.warning(
+            "FlashAttention is not available on this device. Using scaled_dot_product_attention instead."
+        )
+except Exception:
+    from torch.nn.functional import scaled_dot_product_attention as sdpa
+
+    logger.warning(
+        "FlashAttention is not available on this device. Using scaled_dot_product_attention instead."
+    )
+
+
+class SelfAttn(nn.Module):
+    """
+    Area-attention module for YOLO models, providing efficient attention mechanisms.
+
+    This module implements an area-based attention mechanism that processes input features in a spatially-aware manner,
+    making it particularly effective for object detection tasks.
+
+    Attributes:
+        area (int): Number of areas the feature map is divided.
+        num_heads (int): Number of heads into which the attention mechanism is divided.
+        head_dim (int): Dimension of each attention head.
+        qkv (Conv): Convolution layer for computing query, key and value tensors.
+        proj (Conv): Projection convolution layer.
+
+    Methods:
+        forward: Applies area-attention to input tensor.
+
+    Examples:
+        >>> attn = AAttn(dim=256, num_heads=8, area=4)
+        >>> x = torch.randn(1, 256, 32, 32)
+        >>> output = attn(x)
+        >>> print(output.shape)
+        torch.Size([1, 256, 32, 32])
+    """
+
+    def __init__(self, dim, num_heads, area=1):
+        """Initializes the area-attention module, a simple yet efficient attention module for YOLO."""
+        super().__init__()
+        self.area = area
+
+        self.num_heads = num_heads
+        self.head_dim = head_dim = dim // num_heads
+        all_head_dim = head_dim * self.num_heads
+
+        self.qk = Conv(dim, all_head_dim * 2, 1, act=False)
+        self.v = Conv(dim, all_head_dim, 1, act=False)
+        self.proj = Conv(all_head_dim, dim, 1, act=False)
+
+    def forward(self, x):
+        """Processes the input tensor 'x' through the area-attention"""
+        B, C, H, W = x.shape
+        N = H * W
+
+        qk = self.qk(x).flatten(2).transpose(1, 2)
+        v = self.v(x)
+        v = v.flatten(2).transpose(1, 2)
+
+        if self.area > 1:
+            qk = qk.reshape(B * self.area, N // self.area, C * 2)
+            v = v.reshape(B * self.area, N // self.area, C)
+            B, N, _ = qk.shape
+        q, k = qk.split([C, C], dim=2)
+
+        if x.is_cuda and USE_FLASH_ATTN:
+            q = q.view(B, N, self.num_heads, self.head_dim)
+            k = k.view(B, N, self.num_heads, self.head_dim)
+            v = v.view(B, N, self.num_heads, self.head_dim)
+
+            x = flash_attn_func(  # type: ignore
+                q.contiguous().half(), k.contiguous().half(), v.contiguous().half()
+            ).to(q.dtype)
+        else:
+            q = q.transpose(1, 2).view(B, self.num_heads, self.head_dim, N)
+            k = k.transpose(1, 2).view(B, self.num_heads, self.head_dim, N)
+            v = v.transpose(1, 2).view(B, self.num_heads, self.head_dim, N)
+
+            attn = (q.transpose(-2, -1) @ k) * (self.head_dim**-0.5)
+            max_attn = attn.max(dim=-1, keepdim=True).values
+            exp_attn = torch.exp(attn - max_attn)
+            attn = exp_attn / exp_attn.sum(dim=-1, keepdim=True)
+            x = v @ attn.transpose(-2, -1)
+
+            x = x.permute(0, 3, 1, 2)
+
+        if self.area > 1:
+            x = x.reshape(B // self.area, N * self.area, C)
+            B, N, _ = x.shape
+        x = x.reshape(B, H, W, C).permute(0, 3, 1, 2)
+
+        return self.proj(x)
+
 
 def autopad(k, p=None, d=1):  # kernel, padding, dilation
     """Pad to 'same' shape outputs."""
     if d > 1:
-        k = d * (k - 1) + 1 if isinstance(k, int) else [d * (x - 1) + 1 for x in k]  # actual kernel-size
+        k = (
+            d * (k - 1) + 1 if isinstance(k, int) else [d * (x - 1) + 1 for x in k]
+        )  # actual kernel-size
     if p is None:
         p = k // 2 if isinstance(k, int) else [x // 2 for x in k]  # auto-pad
     return p
@@ -24,9 +134,15 @@ class Conv(nn.Module):
     def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
         """Initialize Conv layer with given arguments including activation."""
         super().__init__()
-        self.conv = nn.Conv2d(c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.conv = nn.Conv2d(
+            c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False
+        )
         self.bn = nn.BatchNorm2d(c2)
-        self.act = self.default_act if act is True else act if isinstance(act, nn.Module) else nn.Identity()
+        self.act = (
+            self.default_act
+            if act is True
+            else act if isinstance(act, nn.Module) else nn.Identity()
+        )
 
     def forward(self, x):
         """Apply convolution, batch normalization and activation to input tensor."""
@@ -37,92 +153,46 @@ class Conv(nn.Module):
         return self.act(self.conv(x))
 
 
-class Gate(nn.Module):
-    def __init__(
-        self,
-        num_experts: int = 8,
-        channels: int = 512,
-    ):
-        super().__init__()
-
-        self.root = int(math.isqrt(num_experts))
-        self.avg_pool = nn.AdaptiveAvgPool2d((self.root, self.root))
-
-        # 使用更大的隐藏层增强表达能力
-        hidden_dim = int(num_experts * 2.0)
-        self.spatial_mixer = nn.Sequential(
-            nn.Linear(num_experts, hidden_dim, bias=True),
-            nn.SiLU(),
-            # 设置bias增加自由度，不使用bias的话经过sigmoid激活函数后，所有专家的初始权重会在0.5附近
-            nn.Linear(hidden_dim, num_experts, bias=True),
-            # 绝对不能用 nn.Softmax(dim=-1), 否则性能严重下降，初始权重会被约束在1/num_experts附近，太小了 
-            nn.Sigmoid(),  
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        B, C, _, _ = x.shape
-        pooled = self.avg_pool(x)  # (B, C, root, root)
-        # print(pooled.shape)
-        weights = self.spatial_mixer(pooled.view(B, C, -1))  # (B, C, num_experts)
-        return weights
-
-
 class MoVE(nn.Module):
     """
-    MoVE: Multi-experts Convolutional Neural Network with Gate mechanism.
+    MoVE: Multi-experts Convolutional Neural Network.
 
     """
 
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
+        channels: int,
         num_experts: int = 9,
         kernel_size: int = 3,
-        dilation: int = 1,
     ):
         super().__init__()
-
+        self.channels = channels
         self.num_experts = num_experts
 
+        assert channels % num_experts == 0, "channels must be divisible by num_experts"
+
         # 并行化专家计算
-        self.expert_conv = nn.Conv2d(
-            in_channels,
-            in_channels * num_experts,
-            kernel_size,
-            padding=dilation,
-            dilation=dilation,
-            groups=in_channels,
-            bias=False,
+        self.experts = Conv(
+            channels, channels * num_experts, kernel_size, g=channels, act=True
         )
-        self.expert_norm = nn.InstanceNorm2d(in_channels * num_experts)
-        self.expert_act = nn.SiLU()
 
-        self.gate = Gate(num_experts=num_experts, channels=in_channels)
-
-        self.out_project = Conv(c1=in_channels, c2=out_channels, k=1, act=True)
+        # 跨通道融合
+        self.fusion = Conv(
+                channels * num_experts,
+                channels,
+                k=1,
+                g=num_experts,
+                act=True,
+            )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        
+        expert_outputs = self.experts(x)  # (B, C*A, H, W)
 
-        B, C, H, W = x.shape
-        A = self.num_experts
+        out = self.fusion(expert_outputs)
 
-        # 获取门控权重和索引
-        weights = self.gate(x)  # (B, C, A)
-
-        # 使用分组卷积处理所有通道
-        expert_outputs = self.expert_act(
-            self.expert_norm(self.expert_conv(x))
-        )  # (B, C*A, H, W)
-        expert_outputs = expert_outputs.view(B, C, A, H, W)  # (B, C, A, H, W)
-
-        # 权重应用与求和
-        weights = weights.view(B, C, A, 1, 1)
-        moe_out = (expert_outputs * weights).sum(dim=2)
-
-        moe_out = self.out_project(moe_out)
-
-        return moe_out
+        return out
+    
 
 def channel_shuffle(x, groups):
     """Channel Shuffle operation.
@@ -158,21 +228,18 @@ class MoVE_GhostModule(nn.Module):
         main_kernel_size: int = 3,  # 主分支的卷积核大小
         num_experts: int = 16,  # 轻量分支专家数量
         cheap_kernel_size: int = 3,
-        dilation: int = 1,
     ):
         super().__init__()
 
         self.middle_channels = int(in_channels // 2)
         self.primary_conv = Conv(
-            in_channels, self.middle_channels, k=main_kernel_size, d=dilation, act=True
+            in_channels, self.middle_channels, k=main_kernel_size, act=True
         )
 
         self.cheap_operation = MoVE(
             self.middle_channels,
-            self.middle_channels,
             num_experts,
-            cheap_kernel_size,
-            dilation,
+            kernel_size=cheap_kernel_size,
         )
 
         self.out_project = Conv(self.middle_channels * 2, out_channels, k=1, act=True)
@@ -185,21 +252,55 @@ class MoVE_GhostModule(nn.Module):
         out = self.out_project(out)
         return out
 
+class GhostModule(nn.Module):
+    """ """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,  # 主分支的卷积核大小
+    ):
+        super().__init__()
+
+        self.middle_channels = int(in_channels // 2)
+        self.primary_conv = Conv(
+            in_channels, self.middle_channels, k=kernel_size, act=True
+        )
+
+        self.cheap_operation = Conv(
+            self.middle_channels,
+            self.middle_channels,
+            k=3,
+            g=self.middle_channels,
+            act=True,
+        )  # 3x3深度分离卷积, 即num_experts=1
+
+        # self.out_project = Conv(self.middle_channels * 2, out_channels, k=1, act=True)
+
+    def forward(self, x):
+        x1 = self.primary_conv(x)
+        x2 = self.cheap_operation(x1)
+        out = torch.cat([x1, x2], dim=1)
+        # out = channel_shuffle(out, 2)
+        # out = self.out_project(out)
+        return out
+
 class MG_ELAN(nn.Module):
-    def  __init__(
+    def __init__(
         self,
         in_channels: int,
         out_channels: int,
         kernel_size: int = 3,
         num_experts: int = 16,
         middle_ratio: float = 0.5,
-        num_blocks: int = 2
+        num_blocks: int = 2,
     ):
         super().__init__()
 
         middle_channels = int(in_channels * middle_ratio)
         block_channels = int(in_channels * middle_ratio)
-        final_channels = int(2 * middle_channels) + int(num_blocks  * block_channels)
+        final_channels = int(2 * middle_channels) + int(num_blocks * block_channels)
         self.main_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
         self.short_conv = Conv(c1=in_channels, c2=middle_channels, k=1, act=True)
 
@@ -211,13 +312,17 @@ class MG_ELAN(nn.Module):
                 main_kernel_size=kernel_size,
                 num_experts=num_experts,
                 cheap_kernel_size=3,
-                dilation = 1,
             )
+            # internal_block = GhostModule(
+            #     in_channels=middle_channels,
+            #     out_channels=block_channels,
+            #     kernel_size=1,
+            # )
             middle_channels = block_channels
             self.blocks.append(internal_block)
 
         self.out_project = Conv(c1=final_channels, c2=out_channels, k=1, act=True)
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x_short = self.short_conv(x)
         x_main = self.main_conv(x)
@@ -237,9 +342,9 @@ class light_ConvBlock(nn.Module):
             Conv(c1=in_channels, c2=in_channels, k=3, g=in_channels, act=True),
             Conv(c1=in_channels, c2=out_channels, k=1, act=True),
         )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.conv_block(x)
-
 
 class DualAxisAggAttn(nn.Module):
     def __init__(
@@ -255,15 +360,34 @@ class DualAxisAggAttn(nn.Module):
         self.main_conv = Conv(c1=channels, c2=middle_channels, k=1, act=True)
         self.short_conv = Conv(c1=channels, c2=middle_channels, k=1, act=True)
 
-        self.qkv = nn.ModuleDict({
-            'W': nn.Conv2d(in_channels=middle_channels, out_channels=1 + 2 * middle_channels, kernel_size=1, bias=True),
-            'H': nn.Conv2d(in_channels=middle_channels, out_channels=1 + 2 * middle_channels, kernel_size=1, bias=True)
-        })
+        self.qkv = nn.ModuleDict(
+            {
+                "W": nn.Conv2d(
+                    in_channels=middle_channels,
+                    out_channels=1 + 2 * middle_channels,
+                    kernel_size=1,
+                    bias=True,
+                ),
+                "H": nn.Conv2d(
+                    in_channels=middle_channels,
+                    out_channels=1 + 2 * middle_channels,
+                    kernel_size=1,
+                    bias=True,
+                ),
+            }
+        )
 
-        self.conv_fusion = nn.ModuleDict({
-            'W': light_ConvBlock(in_channels=middle_channels, out_channels=middle_channels),
-            'H': light_ConvBlock(in_channels=middle_channels, out_channels=middle_channels)
-        })
+        self.conv_fusion = nn.ModuleDict(
+            {
+                "W": light_ConvBlock(
+                    in_channels=middle_channels, out_channels=middle_channels
+                ),
+                "H": light_ConvBlock(
+                    in_channels=middle_channels, out_channels=middle_channels
+                ),
+            }
+        )
+
 
         final_channels = int(2 * middle_channels)
         self.out_project = Conv(c1=final_channels, c2=channels, k=1, act=True)
@@ -271,37 +395,167 @@ class DualAxisAggAttn(nn.Module):
     def _apply_axis_attention(self, x, axis):
         """通用轴注意力计算"""
         qkv = self.qkv[axis](x)
-        query, key, value = torch.split(qkv, [1, self.middle_channels, self.middle_channels], dim=1)
-        
+        query, key, value = torch.split(
+            qkv, [1, self.middle_channels, self.middle_channels], dim=1
+        )
+
         # 明确指定softmax维度
-        dim = -1 if axis == 'W' else -2
+        dim = -1 if axis == "W" else -2
         context_scores = F.softmax(query, dim=dim)
-        context_vector = (key * context_scores).sum(dim=dim, keepdim=True) 
+        context_vector = (key * context_scores).sum(dim=dim, keepdim=True)
         # gate = F.tanh(self.alpha[axis] * value) # 效果不及sigmoid
         # gate = F.silu(value) # 效果最差
         gate = F.sigmoid(value)
-         # 将全局上下文向量乘以权重，并广播注入到特征图中
-        out = x + gate * context_vector.expand_as(value) 
+        # 将全局上下文向量乘以权重，并广播注入到特征图中
+        out = x + gate * context_vector.expand_as(value)
         return out
-    
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Args:
             x (torch.Tensor): 输入张量，形状为 [B, C, H, W]
-        
+
         Returns:
             torch.Tensor: 输出张量，形状为 [B, C, H, W]
         """
         x_short = self.short_conv(x)
         x_main = self.main_conv(x)
         # 宽轴注意力
-        x_W = self._apply_axis_attention(x_main, 'W') 
-        x_W_fused = self.conv_fusion['W'](x_W) + x_W
+        x_W = self._apply_axis_attention(x_main, "W")
+        x_W_fused = self.conv_fusion["W"](x_W) + x_W
         # 高轴注意力
-        x_H = self._apply_axis_attention(x_W_fused, 'H') 
-        x_H_fused = self.conv_fusion['H'](x_H) +  x_H
+        x_H = self._apply_axis_attention(x_W_fused, "H")
+        x_H_fused = self.conv_fusion["H"](x_H) + x_H
 
         x_out = torch.cat([x_H_fused, x_short], dim=1)
+
+        x_out = self.out_project(x_out)
+
+        return x_out
+
+
+class DualAxisAggAttn_no_aggregation(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        middle_ratio: float = 0.5,
+    ):
+        super().__init__()
+        self.channels = channels
+        middle_channels = int(channels * middle_ratio)
+        self.middle_channels = middle_channels
+
+        self.main_conv = Conv(c1=channels, c2=middle_channels, k=1, act=True)
+        self.short_conv = Conv(c1=channels, c2=middle_channels, k=1, act=True)
+
+
+        self.conv_fusion = nn.ModuleDict(
+            {
+                "W": light_ConvBlock(
+                    in_channels=middle_channels, out_channels=middle_channels
+                ),
+                "H": light_ConvBlock(
+                    in_channels=middle_channels, out_channels=middle_channels
+                ),
+            }
+        )
+
+
+        final_channels = int(2 * middle_channels)
+        self.out_project = Conv(c1=final_channels, c2=channels, k=1, act=True)
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): 输入张量，形状为 [B, C, H, W]
+
+        Returns:
+            torch.Tensor: 输出张量，形状为 [B, C, H, W]
+        """
+        x_short = self.short_conv(x)
+        x_main = self.main_conv(x)
+ 
+        x_W = self.conv_fusion["W"](x_main) + x_main
+ 
+        x_H = self.conv_fusion["H"](x_W) + x_W
+
+        x_out = torch.cat([x_H, x_short], dim=1)
+
+        x_out = self.out_project(x_out)
+
+        return x_out
+
+class DualAxisAggAttn_no_fusion(nn.Module):
+    def __init__(
+        self,
+        channels: int,
+        middle_ratio: float = 0.5,
+    ):
+        super().__init__()
+        self.channels = channels
+        middle_channels = int(channels * middle_ratio)
+        self.middle_channels = middle_channels
+
+        self.main_conv = Conv(c1=channels, c2=middle_channels, k=1, act=True)
+        self.short_conv = Conv(c1=channels, c2=middle_channels, k=1, act=True)
+
+        self.qkv = nn.ModuleDict(
+            {
+                "W": nn.Conv2d(
+                    in_channels=middle_channels,
+                    out_channels=1 + 2 * middle_channels,
+                    kernel_size=1,
+                    bias=True,
+                ),
+                "H": nn.Conv2d(
+                    in_channels=middle_channels,
+                    out_channels=1 + 2 * middle_channels,
+                    kernel_size=1,
+                    bias=True,
+                ),
+            }
+        )
+
+        final_channels = int(2 * middle_channels)
+        self.out_project = Conv(c1=final_channels, c2=channels, k=1, act=True)
+
+    def _apply_axis_attention(self, x, axis):
+        """通用轴注意力计算"""
+        qkv = self.qkv[axis](x)
+        query, key, value = torch.split(
+            qkv, [1, self.middle_channels, self.middle_channels], dim=1
+        )
+
+        # 明确指定softmax维度
+        dim = -1 if axis == "W" else -2
+        context_scores = F.softmax(query, dim=dim)
+        context_vector = (key * context_scores).sum(dim=dim, keepdim=True)
+        # gate = F.tanh(self.alpha[axis] * value) # 效果不及sigmoid
+        # gate = F.silu(value) # 效果最差
+        gate = F.sigmoid(value)
+        # 将全局上下文向量乘以权重，并广播注入到特征图中
+        out = x + gate * context_vector.expand_as(value)
+        return out
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            x (torch.Tensor): 输入张量，形状为 [B, C, H, W]
+
+        Returns:
+            torch.Tensor: 输出张量，形状为 [B, C, H, W]
+        """
+        x_short = self.short_conv(x)
+        x_main = self.main_conv(x)
+        # 宽轴注意力
+        x_W = self._apply_axis_attention(x_main, "W")
+
+        # 高轴注意力
+        x_H = self._apply_axis_attention(x_W, "H")
+
+
+        x_out = torch.cat([x_H, x_short], dim=1)
 
         x_out = self.out_project(x_out)
 
@@ -320,8 +574,38 @@ class TransMoVE(nn.Module):
         super().__init__()
         # 注意力子层
         # --------------------------------------------------------------
-        self.attn = DualAxisAggAttn(channels=in_channels)
 
+        self.attn = DualAxisAggAttn(channels=in_channels)
+        # self.attn = DualAxisAggAttn_no_aggregation(channels=in_channels)
+        # self.attn = DualAxisAggAttn_no_fusion(channels=in_channels)
+
+        # self attention
+        # ---------------------------------------------------------------
+        # summary: 272 layers, 2,618,176 parameters, 2,618,160 gradients, 6.9 GFLOPs
+        # print(f"TransMoVE: {in_channels} -> {out_channels}")
+        # num_heads = max(1, out_channels // 64)
+        # self.attn = SelfAttn(dim=out_channels,num_heads=num_heads, area=1)
+
+        # Area attention
+        # ---------------------------------------------------------------
+        # summary: 272 layers, 2,618,176 parameters, 2,618,160 gradients, 6.9 GFLOPs
+        # num_heads = max(1, out_channels // 64)
+        # area = int(512 /  out_channels)
+        # if area < 4:
+        #     area = 1
+        # if out_channels == 256: # 256是n scale模型第4阶段的输入通道数，这里是一个取巧的做法
+        #     area = 1
+        # else:
+        #     area = 4
+        # # 主干网络的最后一个阶段不能划分，不然推理阶段由于图像分辨率不能整除而报错
+        # self.attn = SelfAttn(dim=out_channels,num_heads=num_heads, area=area)
+
+        # Criss Cross Attention
+        # summary: 252 layers, 2,375,580 parameters, 2,375,564 gradients, 6.2 GFLOPs
+        # ---------------------------------------------------
+        # self.attn = CrissCrossAttention(in_channels)
+
+        self.norm1 = nn.BatchNorm2d(in_channels)
         # 局部特征提取模块
         #  --------------------------------------------------------------
         self.local_extractor = MG_ELAN(
@@ -330,9 +614,9 @@ class TransMoVE(nn.Module):
             kernel_size=kernel_size,
             num_experts=num_experts,
             middle_ratio=0.5,
-            num_blocks=2
+            num_blocks=2,
         )
-
+        self.norm2 = nn.BatchNorm2d(in_channels)
 
         # 输出映射层
         # --------------------------------------------------------------
@@ -340,28 +624,29 @@ class TransMoVE(nn.Module):
             self.out_project = Conv(c1=in_channels, c2=out_channels, k=1, act=True)
         else:
             self.out_project = nn.Identity()
-     
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         # 注意力子层
         residual = x
-        x = self.attn(x) +  residual
+        x = self.norm1(x)
+        x = self.attn(x) + residual
 
         # 局部特征提取子层
         residual = x
+        x = self.norm2(x)
         x = self.local_extractor(x) + residual
 
         x = self.out_project(x)
-        
-        return  x
+
+        return x
+
 
 if __name__ == "__main__":
     model = TransMoVE(in_channels=64, out_channels=64)
-    model_info(model,detailed=False)
+    model_info(model, detailed=False)
     x = torch.randn(1, 64, 224, 224)
     # 将模型设置为评估模式
     model.eval()
     y = model(x)
     print(y.shape)
-
-

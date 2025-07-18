@@ -4,56 +4,83 @@ import torch.nn as nn
 from ultralytics.nn.modules.conv import Conv
 import torch.nn.functional as F
 
-class PinwheelAttnBlock(nn.Module):
+class PinwheelAttn(nn.Module):
 
     def __init__(self, channels):
         super().__init__()
 
         self.channels = channels
 
-        self.qkv_W = Conv(c1=channels, c2=1+(2*channels), k=1, act=True)
-        self.qkv_H = Conv(c1=channels, c2=1+(2*channels), k=1, act=True)
+        self.qk = nn.ModuleDict({
+            'W': nn.Conv2d(in_channels=channels, out_channels=1+(1*channels), kernel_size=1, bias=True),
+            'H': nn.Conv2d(in_channels=channels, out_channels=1+(1*channels), kernel_size=1, bias=True)
+        })
+        self.v = nn.Conv2d(in_channels=channels, out_channels=channels, kernel_size=1, bias=True)
 
-        self.filter = nn.Sequential(
-            Conv(c1=channels, c2=channels, k=1, act=True),
-            Conv(
-                c1=channels, c2=channels, k=3, g=channels, act=True
-            ),
-            Conv(c1=channels, c2=channels, k=1, act=True),
+        self.out_proj = Conv(c1=channels, c2=channels, k=1, act=True)
+
+    def _apply_axis_aggragation(self, x, axis):
+        """通用轴特征聚合计算"""
+        qk = self.qk[axis](x)
+        query, key = torch.split(
+            qk, [1, self.channels], dim=1
         )
+
+        # 明确指定softmax维度
+        dim = -1 if axis == "W" else -2
+        context_scores = F.softmax(query, dim=dim)
+        context_vector = (key * context_scores).sum(dim=dim, keepdim=True)
+
+        return context_vector
 
     def forward(self, x):
         # 横向选择性聚合全局上下文信息
-        qkv_W = self.qkv_W(x)
-        query, key, value = torch.split(qkv_W, [1, self.channels, self.channels], dim=1)
-        context_scores = F.softmax(query, dim=-1)
-        context_vector = key * context_scores
-        context_vector = torch.sum(context_vector, dim=-1, keepdim=True)
-        x_W = x + value * context_vector.expand_as(x) / math.sqrt(self.channels)
-
+        context_vector_W = self._apply_axis_aggragation(x, axis="W") # (B, C, H, 1)
+        
         # 纵向选择性聚合全局上下文信息
-        qkv_H = self.qkv_H(x)
-        query, key, value = torch.split(qkv_H, [1, self.channels, self.channels], dim=1)
-        context_scores = F.softmax(query, dim=-2)
-        context_vector = key * context_scores
-        context_vector = torch.sum(context_vector, dim=-2, keepdim=True)
-        x_H = x + value * context_vector.expand_as(x) / math.sqrt(self.channels)
+        context_vector_H = self._apply_axis_aggragation(x, axis="H") # (B, C, 1, W)
 
-        att_out = x_W + x_H
+        # 整体上下文信息
+        context = context_vector_W * context_vector_H
+       
+        # 通过门控机制调节上下文信息，并注入到原始特征中 
+        out = x + F.sigmoid(self.v(x)) * context
 
-        x_out = self.filter(att_out)
+        out = self.out_proj(out)
 
-        return x_out
+        return out
 
+class PinwheelAttnBlock(nn.Module):
 
-class PinwheelAttn(nn.Module):
+    def __init__(self, channels):
+        super().__init__()
+
+        self.attn = PinwheelAttn(channels)
+        self.norm1 = nn.BatchNorm2d(channels)
+
+        self.local_extractor = Conv(c1=channels, c2=channels, k=3, g=1, act=True)
+        self.norm2 = nn.BatchNorm2d(channels)
+
+    def forward(self, x):
+        residual = x
+
+        x = self.norm1(x)
+        x = self.attn(x)  + residual
+
+        residual = x
+        x = self.norm2(x)
+        x = self.local_extractor(x)  + residual
+
+        return x
+
+class PinwheelAttnLayer(nn.Module):
     """风车注意力，哈哈哈哈哈"""
 
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
-        num_blocks: int = 1,
+        num_blocks: int = 2,
     ):
         super().__init__()
 

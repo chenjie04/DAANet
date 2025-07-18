@@ -3575,3 +3575,507 @@ class TransMoVE(nn.Module):
             block_outs.append(x_block)
         x_final = torch.cat((*block_outs[::-1], x_main, x_short), dim=1)
         return self.final_conv(x_final) + residual
+
+class MoVE_learnable_weights(nn.Module):
+    """
+    MoVE: Multi-experts Convolutional Neural Network with learnable weights.
+
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_experts: int = 9,
+        kernel_size: int = 3,
+        dilation: int = 1,
+    ):
+        super().__init__()
+
+        self.num_experts = num_experts
+        padding = kernel_size // 2
+
+        # 并行化专家计算
+        self.expert_conv = nn.Conv2d(
+            in_channels,
+            in_channels * num_experts,
+            kernel_size,
+            padding=padding,
+            groups=in_channels,
+            bias=False,
+        )
+        self.expert_norm = nn.InstanceNorm2d(in_channels * num_experts)
+        self.expert_act = nn.SiLU()
+
+        self.scales = nn.Parameter(
+            torch.ones(in_channels, num_experts), requires_grad=True
+        )
+
+        self.out_project = Conv(c1=in_channels, c2=out_channels, k=1, act=True)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        B, C, H, W = x.shape
+        A = self.num_experts
+
+        # 使用分组卷积处理所有通道
+        expert_outputs = self.expert_act(
+            self.expert_norm(self.expert_conv(x))
+        )  # (B, C*A, H, W)
+        expert_outputs = expert_outputs.view(B, C, A, H, W) * self.scales.view(1, C, A, 1, 1)  # (B, C, A, H, W)
+
+        moe_out = expert_outputs.sum(dim=2)
+
+        moe_out = self.out_project(moe_out)
+
+        return moe_out
+
+
+# runs/yolo113_VOC_ab/n_experts_9_62.60
+# -------------------------------------------------------------
+# class Gate(nn.Module):
+#     def __init__(
+#         self,
+#         num_experts: int = 8,
+#         channels: int = 512,
+#     ):
+#         super().__init__()
+
+#         self.root = int(math.isqrt(num_experts))
+#         self.avg_pool = nn.AdaptiveAvgPool2d((self.root, self.root))
+
+#         # 使用更大的隐藏层增强表达能力
+#         hidden_dim = int(num_experts * 2.0)
+#         self.spatial_mixer = nn.Sequential(
+#             nn.Linear(num_experts, hidden_dim, bias=False),
+#             nn.SiLU(),
+#             # 设置bias增加自由度，不使用bias的话经过sigmoid激活函数后，所有专家的初始权重会在0.5附近
+#             nn.Linear(hidden_dim, num_experts, bias=True),
+#             # 绝对不能用 nn.Softmax(dim=-1), 否则性能严重下降，初始权重会被约束在1/num_experts附近，太小了 
+#             nn.Sigmoid(),  
+#         )
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         B, C, _, _ = x.shape
+#         pooled = self.avg_pool(x)  # (B, C, root, root)
+#         # print(pooled.shape)
+#         weights = self.spatial_mixer(pooled.view(B, C, -1))  # (B, C, num_experts)
+#         return weights
+
+
+# class MoVE(nn.Module):
+#     """
+#     MoVE: Multi-experts Convolutional Neural Network with Gate mechanism.
+
+#     """
+
+#     def __init__(
+#         self,
+#         in_channels: int,
+#         out_channels: int,
+#         num_experts: int = 9,
+#         kernel_size: int = 3,
+#         dilation: int = 1,
+#     ):
+#         super().__init__()
+
+#         self.num_experts = num_experts
+
+#         # 并行化专家计算
+#         self.expert_conv = nn.Conv2d(
+#             in_channels,
+#             in_channels * num_experts,
+#             kernel_size,
+#             padding=dilation,
+#             dilation=dilation,
+#             groups=in_channels,
+#             bias=False,
+#         )
+#         self.expert_norm = nn.InstanceNorm2d(in_channels * num_experts)
+#         self.expert_act = nn.SiLU()
+
+#         self.gate = Gate(num_experts=num_experts, channels=in_channels)
+
+#         self.out_project = Conv(c1=in_channels, c2=out_channels, k=1, act=True)
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+#         B, C, H, W = x.shape
+#         A = self.num_experts
+
+#         # 获取门控权重和索引
+#         weights = self.gate(x)  # (B, C, A)
+
+#         # 使用分组卷积处理所有通道
+#         expert_outputs = self.expert_act(
+#             self.expert_norm(self.expert_conv(x))
+#         )  # (B, C*A, H, W)
+#         expert_outputs = expert_outputs.view(B, C, A, H, W)  # (B, C, A, H, W)
+
+#         # 权重应用与求和
+#         weights = weights.view(B, C, A, 1, 1)
+#         moe_out = (expert_outputs * weights).sum(dim=2)
+
+#         moe_out = self.out_project(moe_out)
+
+#         return moe_out
+
+# runs/yolo113_VOC_ab/n_experts_9_new_gate_62.74
+# -------------------------------------------------------------
+# class Gate(nn.Module):
+#     """
+#     # 全空间动态门控
+#     """
+#     def __init__(self, num_experts, channels):
+#         super().__init__()
+#         self.num_experts = num_experts
+#         self.proj = nn.Sequential(
+#             nn.Conv2d(channels, channels * num_experts, kernel_size=1, groups=channels, bias=False),
+#             nn.SiLU(),
+#             nn.Conv2d(channels * num_experts, channels * num_experts, kernel_size=1, groups=channels, bias=False)
+#         )
+
+#     def forward(self, x):
+#         # x: (B, C, H, W)
+#         x = self.proj(x)  # -> (B, C*A, H, W)
+#         return x
+
+
+# class MoVE(nn.Module):
+#     """
+#     MoVE: Multi-experts Convolutional Neural Network with Gate mechanism.
+
+#     """
+
+#     def __init__(
+#         self,
+#         in_channels: int,
+#         out_channels: int,
+#         num_experts: int = 9,
+#         kernel_size: int = 3,
+#         dilation: int = 1,
+#     ):
+#         super().__init__()
+
+#         self.num_experts = num_experts
+
+#         # 并行化专家计算
+#         self.expert_conv = nn.Conv2d(
+#             in_channels,
+#             in_channels * num_experts,
+#             kernel_size,
+#             padding=dilation,
+#             dilation=dilation,
+#             groups=in_channels,
+#             bias=False,
+#         )
+#         self.expert_norm = nn.InstanceNorm2d(in_channels * num_experts)
+#         self.expert_act = nn.SiLU()
+
+#         self.gate = Gate(num_experts=num_experts, channels=in_channels)
+
+#         self.out_project = Conv(c1=in_channels, c2=out_channels, k=1, g=out_channels,act=True)
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+#         B, C, H, W = x.shape
+#         A = self.num_experts
+
+#         # 获取门控权重和索引
+#         weights = self.gate(x)  # (B, C*A, H, W)
+
+#         # 使用分组卷积处理所有通道
+#         expert_outputs = self.expert_act(
+#             self.expert_norm(self.expert_conv(x))
+#         )  # (B, C*A, H, W)
+#         expert_outputs = expert_outputs.view(B, C, A, H, W)  # (B, C, A, H, W)
+
+#         # 权重应用与求和
+#         weights = weights.view(B, C, A, H, W)
+#         # weights = F.softmax(weights, dim=2)
+#         weights = F.silu(weights)
+#         expert_outputs = (expert_outputs * weights).sum(dim=2)
+
+#         moe_out = self.out_project(expert_outputs)
+
+#         return moe_out
+
+class RMSNormFlexible(nn.Module):
+    def __init__(self, dim: int, eps: float = 1e-8):
+        super().__init__()
+        self.eps = eps
+        self.scale = nn.Parameter(torch.ones(dim))
+
+    def forward(self, x):
+        if x.dim() == 4:  # BCHW → norm over C
+            rms = x.pow(2).mean(dim=1, keepdim=True).add(self.eps).sqrt()
+            return x / rms * self.scale[None, :, None, None]
+        elif x.dim() == 3:  # BNC
+            rms = x.pow(2).mean(dim=-1, keepdim=True).add(self.eps).sqrt()
+            return x / rms * self.scale
+        else:
+            raise ValueError(f"Unsupported input shape: {x.shape}")
+
+
+class GhostModule(nn.Module):
+    """ """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,  # 主分支的卷积核大小
+    ):
+        super().__init__()
+
+        self.middle_channels = int(in_channels // 2)
+        self.primary_conv = Conv(
+            in_channels, self.middle_channels, k=kernel_size, act=True
+        )
+
+        self.cheap_operation = Conv(
+            self.middle_channels,
+            self.middle_channels,
+            k=3,
+            g=self.middle_channels,
+            act=True,
+        )  # 3x3深度分离卷积, 即num_experts=1
+
+        self.out_project = Conv(self.middle_channels * 2, out_channels, k=1, act=True)
+
+    def forward(self, x):
+        x1 = self.primary_conv(x)
+        x2 = self.cheap_operation(x1)
+        out = torch.cat([x1, x2], dim=1)
+        out = channel_shuffle(out, 2)
+        out = self.out_project(out)
+        return out
+
+def hard_sigmoid(x, inplace: bool = False):
+    if inplace:
+        return x.add_(3.0).clamp_(0.0, 6.0).div_(6.0)
+    else:
+        return F.relu6(x + 3.0) / 6.0
+
+
+class SqueezeExcite(nn.Module):
+    def __init__(self, in_chs, num_experts, act_layer=nn.SiLU, gate_fn=hard_sigmoid):
+        super(SqueezeExcite, self).__init__()
+        self.gate_fn = gate_fn
+        groups = in_chs // num_experts
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv_reduce = nn.Conv2d(in_chs, in_chs, 1, groups=groups, bias=True)
+        self.act1 = act_layer(inplace=True)
+        self.conv_expand = nn.Conv2d(in_chs, in_chs, 1, groups=groups, bias=True)
+
+    def forward(self, x):
+        x_se = self.avg_pool(x)
+        x_se = self.conv_reduce(x_se)
+        x_se = self.act1(x_se)
+        x_se = self.conv_expand(x_se)
+        x = x * self.gate_fn(x_se)
+        return x
+
+        self.init_weights(seed_base=42, diversity_strength=0.01)
+
+    def init_weights(self, seed_base=42, diversity_strength=0.01):
+        """
+        更稳健的专家初始化策略：
+        - 每个专家通道使用不同随机 seed
+        - 标准 kaiming 初始化
+        - 小扰动增强多样性
+        """
+        conv = self.experts[0]
+        assert isinstance(conv, nn.Conv2d)
+
+        with torch.no_grad():
+            for e in range(self.num_experts):
+                for c in range(self.channels):
+                    idx = e * self.channels + c
+                    w = conv.weight[idx]
+
+                    torch.manual_seed(seed_base + e * 1000 + c)
+                    nn.init.kaiming_uniform_(w, a=0, mode='fan_in', nonlinearity='relu')
+
+                    # 添加可控扰动增强多样性
+                    noise = torch.randn_like(w) * diversity_strength
+                    w.add_(noise)
+
+
+# summary: 332 layers, 2,622,504 parameters, 2,622,488 gradients, 6.9 GFLOPs
+# AP = 62.98
+class MoVE(nn.Module):
+    """
+    MoVE: Multi-experts Convolutional Neural Network.
+
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        num_experts: int = 9,
+        kernel_size: int = 3,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.num_experts = num_experts
+
+        # 并行化专家计算
+        self.experts = nn.Sequential(
+            nn.Conv2d(
+                channels,
+                channels * num_experts,
+                kernel_size,
+                padding=kernel_size // 2,
+                groups=channels,
+                bias=False,
+            ),
+            # 分组卷积宜采用实例归一化
+            nn.InstanceNorm2d(channels * num_experts),
+            nn.SiLU(inplace=True),
+        )
+
+        self.fusion = nn.Sequential(
+            nn.Conv2d(
+                channels * num_experts,
+                channels,
+                1,
+                padding=0,
+                groups=num_experts,
+                bias=False,
+            ),
+            # 分组卷积宜采用实例归一化
+            nn.InstanceNorm2d(channels),
+            nn.SiLU(inplace=True),
+        )
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        expert_outputs = self.experts(x)  # (B, C*A, H, W)
+        out = self.fusion(expert_outputs)
+
+        return out
+
+def hard_sigmoid(x, inplace: bool = False):
+    if inplace:
+        return x.add_(3.).clamp_(0., 6.).div_(6.)
+    else:
+        return F.relu6(x + 3.) / 6.
+
+class MoVE(nn.Module):
+    """
+    MoVE: Multi-experts Convolutional Neural Network.
+
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        num_experts: int = 9,
+        kernel_size: int = 3,
+    ):
+        super().__init__()
+        self.channels = channels
+        self.num_experts = num_experts
+
+        # 并行化专家计算
+        self.experts = nn.Sequential(
+            nn.Conv2d(
+                channels,
+                channels * num_experts,
+                kernel_size,
+                padding=kernel_size // 2,
+                groups=channels,
+                bias=False,
+            ),
+            nn.InstanceNorm2d(channels * num_experts), 
+            nn.SiLU()
+        )
+
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(
+                channels,
+                channels * num_experts,
+                1,
+                padding=0,
+                groups=channels,
+                bias=False,
+            ),
+            nn.SiLU(),
+            nn.Conv2d(
+                channels * num_experts,
+                channels * num_experts,
+                1,
+                padding=0,
+                groups=channels,
+                bias=True,
+            ),
+        )
+
+        # Learnable temperature for softmax
+        self.temperature = nn.Parameter(torch.ones(1) * 0.075)
+
+        # Initialize weights
+        self._init_weights()
+
+    def _init_weights(self):
+        # Expert conv initialization
+        nn.init.kaiming_normal_(self.experts[0].weight, mode='fan_out', nonlinearity='relu')
+        
+        # Gate conv initialization
+        nn.init.kaiming_normal_(self.gate[1].weight, mode='fan_out', nonlinearity='relu')
+        nn.init.normal_(self.gate[3].weight, std=1e-6)
+        nn.init.constant_(self.gate[3].bias, 0)  # Initialize bias to zero
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        B, C, H, W = x.shape
+        A = self.num_experts
+        expert_outputs = self.experts(x)  # (B, C*A, H, W)
+        expert_outputs = expert_outputs.view(B, A, C, H, W)
+
+        weights = self.gate(x) / self.temperature
+        weights = weights.view(B, A, C, 1, 1)
+        weights = F.softmax(weights, dim=1)
+
+        out = expert_outputs * weights
+        out = out.sum(dim=1)
+
+        return out
+
+
+# class MoVE(nn.Module):
+#     """
+#     MoVE: Multi-experts Convolutional Neural Network.
+
+#     """
+
+#     def __init__(
+#         self,
+#         channels: int,
+#         num_experts: int = 9,
+#         kernel_size: int = 3,
+#     ):
+#         super().__init__()
+#         self.channels = channels
+#         self.num_experts = num_experts
+
+#         # 并行化专家计算
+#         self.experts = Conv(
+#             channels, channels * num_experts, kernel_size, g=channels, act=True
+#         )
+
+#         # 跨通道融合
+#         self.fusion = Conv(
+#                 channels * num_experts,
+#                 channels,
+#                 k=1,
+#                 g=num_experts,
+#                 act=True,
+#             )
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+#         expert_outputs = self.experts(x)  # (B, C*A, H, W)
+
+#         out = self.fusion(expert_outputs)
+
+#         return out
