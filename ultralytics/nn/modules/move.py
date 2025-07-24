@@ -575,7 +575,7 @@ class TransMoVE(nn.Module):
         # 注意力子层
         # --------------------------------------------------------------
 
-        self.attn = DualAxisAggAttn(channels=in_channels)
+        # self.attn = DualAxisAggAttn(channels=in_channels)
         # self.attn = DualAxisAggAttn_no_aggregation(channels=in_channels)
         # self.attn = DualAxisAggAttn_no_fusion(channels=in_channels)
 
@@ -605,7 +605,7 @@ class TransMoVE(nn.Module):
         # ---------------------------------------------------
         # self.attn = CrissCrossAttention(in_channels)
 
-        self.norm1 = nn.BatchNorm2d(in_channels)
+        # self.norm1 = nn.BatchNorm2d(in_channels)
         # 局部特征提取模块
         #  --------------------------------------------------------------
         self.local_extractor = MG_ELAN(
@@ -628,9 +628,9 @@ class TransMoVE(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
 
         # 注意力子层
-        residual = x
-        x = self.norm1(x)
-        x = self.attn(x) + residual
+        # residual = x
+        # x = self.norm1(x)
+        # x = self.attn(x) + residual
 
         # 局部特征提取子层
         residual = x
