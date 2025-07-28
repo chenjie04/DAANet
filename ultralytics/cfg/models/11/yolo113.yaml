@@ -5,10 +5,10 @@ nc: 80 # number of classes
 scales: # model compound scaling constants, i.e. 'model=yolo11n.yaml' will call yolo11.yaml with scale 'n'
   # [depth, width, max_channels] 
   n: [0.50, 0.25, 1024] # summary: 316 layers, 2,624,904 parameters, 2,624,888 gradients, 6.9 GFLOPs num_experts = 4 max_experts = 8 
-  s: [0.50, 0.50, 1024] # summary: 316 layers, 9,407,400 parameters, 9,407,384 gradients, 22.5 GFLOPs num_experts = 4 max_experts = 16
-  m: [0.50, 1.00, 512]  # summary: 346 layers, 18,187,784 parameters, 18,187,768 gradients, 67.9 GFLOPs num_experts = 4 max_experts = 32
-  l: [1.00, 1.00, 512]  # summary: 596 layers, 27,493,648 parameters, 27,493,632 gradients, 105.0 GFLOPs num_experts = 4 max_experts = 32
-  x: [1.00, 1.50, 512]  # summary: 596 layers, 61,626,032 parameters, 61,626,016 gradients, 233.9 GFLOPs num_experts = 4 max_experts = 48
+  s: [0.50, 0.50, 1024] # summary: 316 layers, 9,428,520 parameters, 9,428,504 gradients, 22.6 GFLOPs num_experts = 8 max_experts = 16
+  m: [0.50, 1.00, 512]  # summary: 346 layers, 18,280,712 parameters, 18,280,696 gradients, 68.8 GFLOPs num_experts = 16 max_experts = 32
+  l: [1.00, 1.00, 512]  # summary: 596 layers, 27,679,504 parameters, 27,679,488 gradients, 106.9 GFLOPs num_experts = 16 max_experts = 32
+  x: [1.00, 1.50, 512]  # summary: 596 layers, 62,090,672 parameters, 62,090,656 gradients, 238.5 GFLOPs num_experts = 24 max_experts = 48
 
 backbone:
   # [from, repeats, module, args]              特征图大小

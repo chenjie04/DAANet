@@ -1086,8 +1086,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = args[0]
             c1 = ch[f]
             c2 = make_divisible(min(c2, max_channels) * width, 8)
-            args = [c1, c2, 0.5, n]
-            n = 1
+            args = [c1, c2, 0.5]
         # -----------------------------------------------------------------
         else:
             c2 = ch[f]
