@@ -3,7 +3,8 @@ from ultralytics import YOLO, NAS
 from thop import profile
 
 
-model = YOLO("yolo113s.yaml")
+model = YOLO("yolo113n.yaml")
+# model = YOLO("runs/yolo113_VOC_ab/n_experts_4_self_attn_60.68/weights/best.pt")
 # print(model)
 
 model.info(detailed=False)

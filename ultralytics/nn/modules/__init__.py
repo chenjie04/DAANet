@@ -89,7 +89,7 @@ from .transformer import (
     TransformerLayer,
 )
 
-from .move import TransMoVE
+from .move import TransMoVE, TransMoVEV2
 from .a_attn import AELAN
 
 __all__ = (
@@ -166,5 +166,6 @@ __all__ = (
     "Index",
     "A2C2f",
     "TransMoVE",
+    "TransMoVEV2",
     "AELAN",
 )

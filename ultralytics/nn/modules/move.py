@@ -641,6 +641,49 @@ class TransMoVE(nn.Module):
 
         return x
 
+class TransMoVEV2(nn.Module):
+    """采用ELAN结构"""
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        num_experts: int = 9,
+        kernel_size: int = 3,
+        num_blocks: int = 2,
+    ):
+        super().__init__()
+        # 注意力子层
+        # --------------------------------------------------------------
+
+        self.attn = DualAxisAggAttn(channels=in_channels)
+        self.norm1 = nn.BatchNorm2d(in_channels)
+        # 局部特征提取模块
+        #  --------------------------------------------------------------
+        self.local_extractor = MG_ELAN(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            num_experts=num_experts,
+            middle_ratio=0.5,
+            num_blocks=num_blocks,
+        )
+        self.norm2 = nn.BatchNorm2d(in_channels)
+
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+
+        # 注意力子层
+        residual = x
+        x = self.norm1(x)
+        x = self.attn(x) + residual
+
+        # 局部特征提取子层
+        x = self.norm2(x)
+        x = self.local_extractor(x)
+
+        return x
+
 
 if __name__ == "__main__":
     model = TransMoVE(in_channels=64, out_channels=64)

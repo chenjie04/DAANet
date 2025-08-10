@@ -1,6 +1,12 @@
 from ultralytics import YOLO
 
-#model = YOLO("yolov8n.pt")
-model = YOLO("runs/yolo11_voc_attn_ab/113n_experts_1624_61.9/weights/best.pt")  # 模型文件路径
+# model = YOLO("yolov8n.pt")
+model = YOLO(
+    "runs/yolo113_VOC_ab/n_experts_4_63.17/weights/best.pt"
+)  # 模型文件路径
 
-results = model("D:/yolov8/1.png", visualize=True)  # 要预测图片路径和使用可视化
+# print(model)
+# Perform inference on an image
+results = model(
+    "runs/feature_visualization/002434.jpg", visualize=True, project="runs/feature_visualization", name="n_experts_4_63.17"
+)  # 要预测图片路径和使用可视化

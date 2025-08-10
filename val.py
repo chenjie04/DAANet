@@ -1,16 +1,16 @@
 from ultralytics import YOLO
 
-model = YOLO("yolo113n.yaml")
-print(model)
-print("模型复杂度:")
-model.info(detailed=False)
+# model = YOLO("yolo113n.yaml")
+# print(model)
+# print("模型复杂度:")
+# model.info(detailed=False)
 
 # wget https://github.com/THU-MIG/yolov10/releases/download/v1.1/yolov10{n/s/m/b/l/x}.pt
-model = YOLO('runs/yolo113_VOC_ab/no_aggrattn/weights/best.pt')
+model = YOLO('runs/yolo113_coco/113s_e8/weights/best.pt')
+model.info()
 
 
-
-metrics = model.val(data='VOC.yaml', batch=64)
+metrics = model.val(data='coco.yaml', batch=32)
 
 print("mAP50-95:", metrics.box.map)  # mAP50-95
 print("mAP50:", metrics.box.map50)  # mAP50
