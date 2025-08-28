@@ -6,11 +6,12 @@ from ultralytics import YOLO
 # model.info(detailed=False)
 
 # wget https://github.com/THU-MIG/yolov10/releases/download/v1.1/yolov10{n/s/m/b/l/x}.pt
-model = YOLO('runs/yolo113_coco/113s_e8/weights/best.pt')
+model = YOLO('runs/yolo113_coco/113l_16e2/weights/best.pt')
+print(model)
 model.info()
 
 
-metrics = model.val(data='coco.yaml', batch=32)
+metrics = model.val(data='coco.yaml', batch=1)
 
 print("mAP50-95:", metrics.box.map)  # mAP50-95
 print("mAP50:", metrics.box.map50)  # mAP50
