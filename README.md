@@ -9,6 +9,9 @@ Extensive experiments validate the effectiveness of the proposed approach. On MS
 ![](images/graph_abstract.png)
 
 ## Results
+
+Comparison with popular state-of-the-art real-time object detectors on the MS COCO 2017 dataset.
+
 | **Method**               | **Param.(M)** | **FLOPs(G)** | **AP<sub>50:95</sub>** | **AP<sub>50</sub>** | **AP<sub>75</sub>** |
 |--------------------------|---------------|--------------|------------------------|---------------------|---------------------|
 | YOLOv6-3.0-N             | 4.7           | 11.4         | 37.0                   | 52.7                | -                   |
