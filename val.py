@@ -6,7 +6,7 @@ from ultralytics import YOLO
 # model.info(detailed=False)
 
 # wget https://github.com/THU-MIG/yolov10/releases/download/v1.1/yolov10{n/s/m/b/l/x}.pt
-model = YOLO('runs/yolo113_coco/113l_16e2/weights/best.pt')
+model = YOLO('runs/yolo113_coco/113x2/weights/best.pt')
 print(model)
 model.info()
 

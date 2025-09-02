@@ -66,7 +66,7 @@ Comparison with popular state-of-the-art real-time object detectors on the MS CO
 | RT-DETRv2-R101           | 76            | 259          | 54.3                   | 72.8                | -                   |
 | YOLOv10-X                | 29.5          | 160.4        | 54.4                   | 71.3                | 59.3                |
 | YOLO11-X                 | 56.9          | 194.9        | 54.6                   | 71.6                | 59.5                |
-| **DA<sup>3</sup>Net-X**  | **61.7**      | **234.8**    | ****                   | ****                | ****                |
+| **DA<sup>3</sup>Net-X**  | **61.7**      | **234.8**    | **55.1**               | **71.8**            | **60.0**            |
 
 ## Training
 
